@@ -1,0 +1,9 @@
+[package]
+name = "rules"
+description = "Ember Arena's game rules: classes, abilities, crowd control and wave pacing. No engine, so a server can run it too."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "game"
+description = "Ember Arena: the Bevy client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rules = { path = "../rules" }
+bevy = "0.18.1"
+
+[lints]
+workspace = true
