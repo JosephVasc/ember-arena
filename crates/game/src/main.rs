@@ -1,15 +1,14 @@
-//! Ember Arena: hold the ring against waves of rival fighters. Pick a class and an arena, move
-//! with WASD; your abilities cast themselves, you level up and pick upgrades, choose a spec at
-//! level 10, and a champion who can stun, fear or hex you arrives every couple of minutes.
+//! Ember Arena: team arena battles. Pick a class and a bracket (1v1, 2v2, 3v3); your team and the
+//! other start at opposite gates; target with Tab or a click, cast your ten abilities from the bar,
+//! play the pillars for line of sight, and be the last team standing.
 
 mod arena;
 mod art;
 mod auto;
-mod combat;
+mod camera;
+mod fight;
 mod fx;
-mod hero;
-mod rivals;
-mod run;
+mod input;
 mod ui;
 
 use bevy::prelude::*;
@@ -26,17 +25,21 @@ fn main() {
         }))
         .insert_resource(ClearColor(Color::srgb(0.07, 0.05, 0.06)))
         .init_state::<Phase>()
+        .init_resource::<Selection>()
+        .init_resource::<Rng>()
+        .configure_sets(Update, (Step::Input, Step::Think, Step::Resolve, Step::Show).chain())
         .add_plugins((
             art::plugin,
             arena::plugin,
-            run::plugin,
-            hero::plugin,
-            rivals::plugin,
-            combat::plugin,
+            camera::plugin,
+            fight::plugin,
+            input::plugin,
             fx::plugin,
             ui::plugin,
             auto::plugin,
         ))
+        .add_systems(OnEnter(Phase::Paused), |mut t: ResMut<Time<Virtual>>| t.pause())
+        .add_systems(OnExit(Phase::Paused), |mut t: ResMut<Time<Virtual>>| t.unpause())
         .run();
 }
 
@@ -47,24 +50,56 @@ pub enum Phase {
     #[default]
     Loading,
     Menu,
-    Playing,
-    LevelUp,
+    /// At the gates: free to move, not to cast, while the countdown runs.
+    Gates,
+    Fight,
     Paused,
-    GameOver,
+    Results,
 }
 
-/// Everything spawned for a run, despawned when it ends.
-#[derive(Component)]
-pub struct RunEntity;
+impl Phase {
+    /// A match is on: the fighters are in the arena.
+    pub fn in_match(self) -> bool {
+        matches!(self, Phase::Gates | Phase::Fight | Phase::Paused | Phase::Results)
+    }
+}
 
-/// The gameplay systems' order inside a frame.
+/// The frame's order: input, the AI's thinking, resolving casts and hits, then showing it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Step {
     Input,
-    Rivals,
-    Combat,
-    Vitals,
+    Think,
+    Resolve,
+    Show,
 }
+
+/// What the menu picked.
+#[derive(Resource)]
+pub struct Selection {
+    pub class: usize,
+    /// Fighters a side: 1, 2 or 3.
+    pub bracket: usize,
+    pub arena: usize,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self { class: 2, bracket: 2, arena: 0 }
+    }
+}
+
+impl Selection {
+    pub fn class(&self) -> &'static rules::spells::Class {
+        &rules::spells::CLASSES[self.class]
+    }
+    pub fn arena(&self) -> &'static rules::arena::ArenaDef {
+        &rules::arena::ARENAS[self.arena]
+    }
+}
+
+/// Everything spawned for a match, despawned when it ends.
+#[derive(Component)]
+pub struct MatchEntity;
 
 /// A floor point `[x, z]` as a world position on the arena floor.
 pub fn at(p: rules::Pt) -> Vec3 {
@@ -112,9 +147,6 @@ impl Rng {
     /// Uniform in `[0, 1)`.
     pub fn f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-    pub fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.f32()
     }
     pub fn index(&mut self, len: usize) -> usize {
         (self.next_u64() % len.max(1) as u64) as usize

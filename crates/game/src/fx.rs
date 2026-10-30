@@ -3,10 +3,10 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use rules::kit::School;
+use rules::spells::School;
 
-use crate::RunEntity;
-use crate::arena::MainCam;
+use crate::MatchEntity;
+use crate::camera::MainCam;
 
 pub fn plugin(app: &mut App) {
     app.add_systems(Startup, setup).add_systems(Update, (fade, float_text));
@@ -43,8 +43,6 @@ pub struct FxAssets {
     pub veil: Vec<Handle<StandardMaterial>>,
     pub team_gold: Handle<StandardMaterial>,
     pub team_red: Handle<StandardMaterial>,
-    pub orb_xp: Handle<StandardMaterial>,
-    pub orb_heal: Handle<StandardMaterial>,
 }
 
 impl FxAssets {
@@ -99,18 +97,6 @@ fn setup(
     };
     let team_gold = team(Color::srgb(1.0, 0.8, 0.3), [1.0, 0.75, 0.25]);
     let team_red = team(Color::srgb(0.9, 0.15, 0.1), [0.9, 0.12, 0.08]);
-    let orb_xp = mats.add(StandardMaterial {
-        base_color: Color::srgb(0.4, 0.9, 1.0),
-        emissive: emissive([0.3, 0.9, 1.0], 5.0),
-        unlit: true,
-        ..default()
-    });
-    let orb_heal = mats.add(StandardMaterial {
-        base_color: Color::srgb(0.3, 1.0, 0.4),
-        emissive: emissive([0.3, 1.0, 0.35], 5.0),
-        unlit: true,
-        ..default()
-    });
     commands.insert_resource(FxAssets {
         sphere: meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()),
         disc: meshes.add(flat(Circle::new(1.0).mesh().resolution(48).build())),
@@ -119,8 +105,6 @@ fn setup(
         veil,
         team_gold,
         team_red,
-        orb_xp,
-        orb_heal,
     });
 }
 
@@ -193,7 +177,7 @@ impl Fx<'_, '_> {
     /// A burst of light at `pos`.
     pub fn flash(&mut self, pos: Vec3, school: School, size: f32) {
         self.commands.spawn((
-            RunEntity,
+            MatchEntity,
             Mesh3d(self.assets.sphere.clone()),
             MeshMaterial3d(self.assets.glow(school)),
             Transform::from_translation(pos + Vec3::Y * 1.0).with_scale(Vec3::splat(size * 0.3)),
@@ -204,14 +188,14 @@ impl Fx<'_, '_> {
     /// A ring rushing out from `pos` to `radius`.
     pub fn nova(&mut self, pos: Vec3, school: School, radius: f32) {
         self.commands.spawn((
-            RunEntity,
+            MatchEntity,
             Mesh3d(self.assets.ring.clone()),
             MeshMaterial3d(self.assets.glow(school)),
             Transform::from_translation(pos + Vec3::Y * 0.15),
             Fade { t: 0.0, life: 0.35, from: 0.5, to: radius },
         ));
         self.commands.spawn((
-            RunEntity,
+            MatchEntity,
             Mesh3d(self.assets.disc.clone()),
             MeshMaterial3d(self.assets.veil(school)),
             Transform::from_translation(pos + Vec3::Y * 0.1),
@@ -222,7 +206,7 @@ impl Fx<'_, '_> {
     /// A floating number or word over `pos`.
     pub fn text(&mut self, pos: Vec3, s: impl Into<String>, color: Color, size: f32) {
         self.commands.spawn((
-            RunEntity,
+            MatchEntity,
             FloatText { world: pos, t: 0.0 },
             Text::new(s),
             TextFont { font_size: size, ..default() },
@@ -240,24 +224,11 @@ impl Fx<'_, '_> {
     /// A glowing sphere in `school`'s colour (a bolt in flight), with `extra` on it.
     pub fn glow_sphere(&mut self, extra: impl Bundle, school: School, tf: Transform) {
         let (mesh, mat) = (self.assets.sphere.clone(), self.assets.glow(school));
-        self.commands.spawn((RunEntity, extra, Mesh3d(mesh), MeshMaterial3d(mat), tf));
+        self.commands.spawn((MatchEntity, extra, Mesh3d(mesh), MeshMaterial3d(mat), tf));
     }
 
-    /// A see-through floor disc in `school`'s colour (an area), with `extra` on it.
-    pub fn veil_disc(&mut self, extra: impl Bundle, school: School, tf: Transform) {
-        let (mesh, mat) = (self.assets.disc.clone(), self.assets.veil(school));
-        self.commands.spawn((RunEntity, extra, Mesh3d(mesh), MeshMaterial3d(mat), tf));
-    }
-
-    /// A pickup orb: experience, or a mend.
-    pub fn orb(&mut self, extra: impl Bundle, heal: bool, tf: Transform) {
-        let mat = if heal { self.assets.orb_heal.clone() } else { self.assets.orb_xp.clone() };
-        let mesh = self.assets.sphere.clone();
-        self.commands.spawn((RunEntity, extra, Mesh3d(mesh), MeshMaterial3d(mat), tf));
-    }
 }
 
 pub const WHITE: Color = Color::WHITE;
-pub const HURT: Color = Color::srgb(1.0, 0.25, 0.2);
 pub const HEAL: Color = Color::srgb(0.35, 1.0, 0.4);
 pub const CRIT: Color = Color::srgb(1.0, 0.85, 0.2);

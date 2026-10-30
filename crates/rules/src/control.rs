@@ -4,10 +4,48 @@
 //! diminishing; snares never diminish.
 
 use crate::Pt;
-use crate::kit::Effect;
 
 /// Seconds a category must rest, after its last control wears off, to be whole again.
 pub const DR_RESET: f32 = 18.0;
+
+/// A control or snare one unit lays on another.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Ctl {
+    /// Speed multiplier for seconds.
+    Slow(f32, f32),
+    Root(f32),
+    Stun(f32),
+    Fear(f32),
+    /// Held for seconds; any damage breaks it.
+    Incap(f32),
+    /// No spellcasting for seconds; diminishes.
+    Silence(f32),
+    /// A kick: the cast breaks and spells lock out for seconds; never diminishes.
+    Interrupt(f32),
+}
+
+impl Ctl {
+    /// The seconds a diminishing control lasts before diminishing.
+    pub fn secs(self) -> Option<f32> {
+        match self {
+            Self::Stun(t) | Self::Fear(t) | Self::Incap(t) | Self::Root(t) | Self::Silence(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// What a status line calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Slow(..) => "Slowed",
+            Self::Root(_) => "Rooted",
+            Self::Stun(_) => "Stunned",
+            Self::Fear(_) => "Feared",
+            Self::Incap(_) => "Incapacitated",
+            Self::Silence(_) => "Silenced",
+            Self::Interrupt(_) => "Interrupted",
+        }
+    }
+}
 
 /// The diminishing-returns categories.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -24,13 +62,13 @@ impl Dr {
     const ALL: usize = 5;
 
     /// The category an effect diminishes in, `None` for the rest (snares and kicks included).
-    pub fn of(effect: Effect) -> Option<Self> {
-        match effect {
-            Effect::Stun(_) => Some(Self::Stun),
-            Effect::Fear(_) => Some(Self::Fear),
-            Effect::Incap(_) => Some(Self::Incap),
-            Effect::Root(_) => Some(Self::Root),
-            Effect::Silence(_) => Some(Self::Silence),
+    pub fn of(ctl: Ctl) -> Option<Self> {
+        match ctl {
+            Ctl::Stun(_) => Some(Self::Stun),
+            Ctl::Fear(_) => Some(Self::Fear),
+            Ctl::Incap(_) => Some(Self::Incap),
+            Ctl::Root(_) => Some(Self::Root),
+            Ctl::Silence(_) => Some(Self::Silence),
             _ => None,
         }
     }
@@ -119,20 +157,20 @@ impl Default for Held {
 impl Held {
     /// Land `effect` for `scale` of its seconds (a champion shrugs most of it off), through the
     /// diminishing returns.
-    pub fn land(&mut self, effect: Effect, scale: f32, from: Pt) -> Landed {
-        match effect {
-            Effect::Slow(m, t) => {
+    pub fn land(&mut self, ctl: Ctl, scale: f32, from: Pt) -> Landed {
+        match ctl {
+            Ctl::Slow(m, t) => {
                 self.slow = if self.slow_t > 0.0 { self.slow.min(m) } else { m };
                 self.slow_t = self.slow_t.max(t * scale);
                 return Landed::Not;
             }
-            Effect::Interrupt(t) => {
+            Ctl::Interrupt(t) => {
                 self.silence_t = self.silence_t.max(t * scale);
                 return Landed::For(t * scale);
             }
             _ => {}
         }
-        let (Some(cat), Some(secs)) = (Dr::of(effect), effect.control_secs()) else {
+        let (Some(cat), Some(secs)) = (Dr::of(ctl), ctl.secs()) else {
             return Landed::Not;
         };
         let secs = self.dr.land(cat, secs * scale);
@@ -275,18 +313,18 @@ mod tests {
     #[test]
     fn a_trinket_clears_controls_but_not_the_diminishing() {
         let mut h = Held::default();
-        assert_eq!(h.land(Effect::Stun(4.0), 1.0, O), Landed::For(4.0));
+        assert_eq!(h.land(Ctl::Stun(4.0), 1.0, O), Landed::For(4.0));
         assert!(h.out() && h.held() && h.frozen());
         h.clear();
         assert!(!h.any());
-        assert_eq!(h.land(Effect::Stun(4.0), 1.0, O), Landed::For(2.0));
+        assert_eq!(h.land(Ctl::Stun(4.0), 1.0, O), Landed::For(2.0));
     }
 
     #[test]
     fn damage_breaks_an_incapacitate_but_not_a_stun() {
         let mut h = Held::default();
-        h.land(Effect::Incap(8.0), 1.0, O);
-        h.land(Effect::Stun(2.0), 1.0, O);
+        h.land(Ctl::Incap(8.0), 1.0, O);
+        h.land(Ctl::Stun(2.0), 1.0, O);
         h.hurt();
         assert_eq!(h.incap_t, 0.0);
         assert!(h.stun_t > 0.0);
@@ -297,9 +335,9 @@ mod tests {
     fn a_snare_keeps_the_stronger_and_never_diminishes() {
         let mut h = Held::default();
         for _ in 0..5 {
-            assert_eq!(h.land(Effect::Slow(0.5, 3.0), 1.0, O), Landed::Not);
+            assert_eq!(h.land(Ctl::Slow(0.5, 3.0), 1.0, O), Landed::Not);
         }
-        h.land(Effect::Slow(0.7, 1.0), 1.0, O);
+        h.land(Ctl::Slow(0.7, 1.0), 1.0, O);
         assert_eq!(h.speed(), 0.5);
         h.tick(3.0);
         assert_eq!(h.speed(), 1.0);
@@ -309,16 +347,16 @@ mod tests {
     fn kicks_lock_out_without_diminishing_and_spare_the_feet() {
         let mut h = Held::default();
         for _ in 0..5 {
-            assert_eq!(h.land(Effect::Interrupt(4.0), 1.0, O), Landed::For(4.0));
+            assert_eq!(h.land(Ctl::Interrupt(4.0), 1.0, O), Landed::For(4.0));
         }
         assert!(h.silenced() && !h.out() && !h.held());
-        assert_eq!(h.land(Effect::Silence(4.0), 1.0, O), Landed::For(4.0));
+        assert_eq!(h.land(Ctl::Silence(4.0), 1.0, O), Landed::For(4.0));
     }
 
     #[test]
     fn a_fear_remembers_what_to_run_from() {
         let mut h = Held::default();
-        h.land(Effect::Fear(3.0), 1.0, [5.0, -2.0]);
+        h.land(Ctl::Fear(3.0), 1.0, [5.0, -2.0]);
         assert_eq!(h.from, [5.0, -2.0]);
     }
 }

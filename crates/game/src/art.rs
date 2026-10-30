@@ -6,8 +6,7 @@ use std::time::Duration;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::scene::SceneInstanceReady;
-use rules::kit::Model;
-use rules::waves::Gear;
+use rules::spells::{Gear, Model};
 
 use crate::Phase;
 
@@ -58,9 +57,7 @@ fn weapons(model: Model) -> &'static [&'static str] {
 fn shown(gear: Gear) -> &'static [&'static str] {
     match gear {
         Gear::SwordShield => &["1H_Sword", "Round_Shield"],
-        Gear::GreatSword => &["2H_Sword"],
         Gear::GreatAxe => &["2H_Axe"],
-        Gear::DualAxes => &["1H_Axe", "1H_Axe_Offhand"],
         Gear::Staff => &["2H_Staff"],
         Gear::Wand => &["1H_Wand", "Spellbook"],
         Gear::Knives => &["Knife", "Knife_Offhand"],
@@ -83,10 +80,13 @@ pub enum Clip {
     Casting,
     Shoot,
     Cheer,
+    StrafeLeft,
+    StrafeRight,
+    Back,
 }
 
 impl Clip {
-    const ALL: [Clip; 12] = [
+    const ALL: [Clip; 15] = [
         Clip::Idle,
         Clip::Run,
         Clip::Death,
@@ -99,6 +99,9 @@ impl Clip {
         Clip::Casting,
         Clip::Shoot,
         Clip::Cheer,
+        Clip::StrafeLeft,
+        Clip::StrafeRight,
+        Clip::Back,
     ];
 
     fn name(self) -> &'static str {
@@ -115,19 +118,25 @@ impl Clip {
             Clip::Casting => "Spellcasting",
             Clip::Shoot => "2H_Ranged_Shoot",
             Clip::Cheer => "Cheer",
+            Clip::StrafeLeft => "Running_Strafe_Left",
+            Clip::StrafeRight => "Running_Strafe_Right",
+            Clip::Back => "Walking_Backwards",
         }
     }
 
     fn looped(self) -> bool {
-        matches!(self, Clip::Idle | Clip::Run | Clip::Casting)
+        matches!(
+            self,
+            Clip::Idle | Clip::Run | Clip::Casting | Clip::StrafeLeft | Clip::StrafeRight | Clip::Back
+        )
     }
 
     /// The attack a loadout swings with.
     pub fn attack(gear: Gear) -> Clip {
         match gear {
             Gear::SwordShield => Clip::Slash,
-            Gear::GreatSword | Gear::GreatAxe => Clip::Chop,
-            Gear::DualAxes | Gear::Knives => Clip::Dual,
+            Gear::GreatAxe => Clip::Chop,
+            Gear::Knives => Clip::Dual,
             Gear::Staff | Gear::Wand => Clip::Cast,
             Gear::Crossbow => Clip::Shoot,
         }
@@ -154,7 +163,6 @@ pub struct ArenaArt {
     pub dirt: Handle<Scene>,
     pub wall: Handle<Scene>,
     pub wall_arched: Handle<Scene>,
-    pub wall_broken: Handle<Scene>,
     pub pillar: Handle<Scene>,
     pub pillar_grand: Handle<Scene>,
     pub torch: Handle<Scene>,
@@ -199,7 +207,6 @@ fn load(mut commands: Commands, assets: Res<AssetServer>) {
             dirt: piece("floor_dirt_large"),
             wall: piece("wall"),
             wall_arched: piece("wall_arched"),
-            wall_broken: piece("wall_broken"),
             pillar: piece("pillar"),
             pillar_grand: piece("pillar_decorated"),
             torch: piece("torch_mounted"),

@@ -1,0 +1,587 @@
+//! One fighter's state and the rules of casting: the global cooldown, cooldowns, the resource,
+//! cast times broken by movement, controls, and what a landed ability does to its target through
+//! auras, absorbs, immunity and diminishing returns.
+
+use crate::Pt;
+use crate::control::{Ctl, Held, Landed};
+use crate::spells::{Aim, AuraDef, AuraKind, Class, GCD, Resource, School, Special, Spell, TRINKET_COOLDOWN};
+
+/// An aura on a unit: a dot, hot, absorb or modifier, from an ability.
+#[derive(Clone, Copy, Debug)]
+pub struct Aura {
+    pub def: AuraDef,
+    pub name: &'static str,
+    pub school: School,
+    pub left: f32,
+    tick: f32,
+    /// What's left of an absorb.
+    pub pool: f32,
+    /// Placed by an enemy: a cleanse removes it.
+    pub harmful: bool,
+}
+
+/// A cast under way.
+#[derive(Clone, Copy, Debug)]
+pub struct Casting {
+    pub slot: usize,
+    pub left: f32,
+    pub total: f32,
+}
+
+/// Why an ability can't go off now: the line a player sees.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fail {
+    Dead,
+    NotReady,
+    Busy,
+    Held,
+    Silenced,
+    NoResource,
+    NoTarget,
+    WrongTarget,
+    OutOfRange,
+    NoSight,
+    Facing,
+    Moving,
+}
+
+impl Fail {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Dead => "You are dead",
+            Self::NotReady => "Ability is not ready yet",
+            Self::Busy => "Another action is in progress",
+            Self::Held => "You can't do that while held",
+            Self::Silenced => "Can't do that while silenced",
+            Self::NoResource => "Not enough resource",
+            Self::NoTarget => "You have no target",
+            Self::WrongTarget => "Invalid target",
+            Self::OutOfRange => "Out of range",
+            Self::NoSight => "Target not in line of sight",
+            Self::Facing => "Target needs to be in front of you",
+            Self::Moving => "Can't do that while moving",
+        }
+    }
+}
+
+/// What the world says about a cast's target, for [`Unit::check`].
+#[derive(Clone, Copy, Debug)]
+pub struct Situation {
+    /// The target, if any: hostile, its distance, line of sight and whether it's in front.
+    pub target: Option<TargetInfo>,
+    pub moving: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TargetInfo {
+    pub hostile: bool,
+    pub dist: f32,
+    pub sight: bool,
+    pub ahead: bool,
+    pub dead: bool,
+}
+
+/// What landing did, for floating text and logs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Feedback {
+    Damage { amount: f32, crit: bool, school: School },
+    Absorbed(f32),
+    Heal(f32),
+    Immune,
+    Ctl(Ctl),
+    Interrupted,
+    Cleansed,
+}
+
+pub struct Unit {
+    pub class: &'static Class,
+    pub hp: f32,
+    pub max_hp: f32,
+    pub res: f32,
+    pub cc: Held,
+    pub auras: Vec<Aura>,
+    pub cds: Vec<f32>,
+    pub gcd: f32,
+    pub casting: Option<Casting>,
+    pub immune_t: f32,
+    pub trinket_cd: f32,
+    pub dead: bool,
+    pub damage_done: f32,
+    pub healing_done: f32,
+}
+
+pub const MAX_RES: f32 = 100.0;
+
+impl Unit {
+    pub fn new(class: &'static Class) -> Self {
+        Self {
+            class,
+            hp: class.health,
+            max_hp: class.health,
+            res: if class.resource == Resource::Rage { 0.0 } else { MAX_RES },
+            cc: Held::default(),
+            auras: Vec::new(),
+            cds: vec![0.0; class.spells.len()],
+            gcd: 0.0,
+            casting: None,
+            immune_t: 0.0,
+            trinket_cd: 0.0,
+            dead: false,
+            damage_done: 0.0,
+            healing_done: 0.0,
+        }
+    }
+
+    pub fn spell(&self, slot: usize) -> &'static Spell {
+        &self.class.spells[slot]
+    }
+
+    pub fn hp_frac(&self) -> f32 {
+        self.hp / self.max_hp
+    }
+
+    fn modifier(&self, pick: fn(AuraKind) -> Option<f32>) -> f32 {
+        self.auras.iter().filter_map(|a| pick(a.def.kind)).product()
+    }
+
+    /// Damage dealt multiplier.
+    pub fn dealt(&self) -> f32 {
+        self.modifier(|k| if let AuraKind::Dealt(m) = k { Some(m) } else { None })
+    }
+
+    fn taken(&self) -> f32 {
+        self.modifier(|k| if let AuraKind::Taken(m) = k { Some(m) } else { None })
+    }
+
+    /// Whether `slot` could go off now, given the target and the unit's own state.
+    pub fn check(&self, slot: usize, s: Situation) -> Result<(), Fail> {
+        let spell = self.spell(slot);
+        if self.dead {
+            return Err(Fail::Dead);
+        }
+        if self.cds[slot] > 0.0 || (spell.gcd && self.gcd > 0.0) {
+            return Err(Fail::NotReady);
+        }
+        if self.casting.is_some() {
+            return Err(Fail::Busy);
+        }
+        if self.cc.out() && !spell.free {
+            return Err(Fail::Held);
+        }
+        if self.cc.silence_t > 0.0 && !spell.free && spell.school != School::Physical {
+            return Err(Fail::Silenced);
+        }
+        if spell.cost > self.res {
+            return Err(Fail::NoResource);
+        }
+        if spell.cast > 0.0 && s.moving {
+            return Err(Fail::Moving);
+        }
+        match spell.aim {
+            Aim::Myself | Aim::Around => Ok(()),
+            Aim::Friend => match s.target {
+                // A friendly ability on no friend lands on yourself.
+                Some(t) if !t.hostile && !t.dead => {
+                    if t.dist > spell.range {
+                        Err(Fail::OutOfRange)
+                    } else if !t.sight {
+                        Err(Fail::NoSight)
+                    } else {
+                        Ok(())
+                    }
+                }
+                _ => Ok(()),
+            },
+            Aim::Enemy => {
+                let t = s.target.ok_or(Fail::NoTarget)?;
+                if !t.hostile || t.dead {
+                    Err(Fail::WrongTarget)
+                } else if t.dist > spell.range {
+                    Err(Fail::OutOfRange)
+                } else if !t.sight {
+                    Err(Fail::NoSight)
+                } else if !t.ahead {
+                    Err(Fail::Facing)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Begin `slot` (already checked): the global cooldown, and a cast bar for a cast time.
+    /// Returns true when it goes off now.
+    pub fn begin(&mut self, slot: usize) -> bool {
+        let spell = self.spell(slot);
+        if spell.gcd {
+            self.gcd = GCD;
+        }
+        if spell.cast > 0.0 {
+            self.casting = Some(Casting { slot, left: spell.cast, total: spell.cast });
+            false
+        } else {
+            self.pay(slot);
+            true
+        }
+    }
+
+    /// The cost and cooldown, when an ability goes off.
+    pub fn pay(&mut self, slot: usize) {
+        let spell = self.spell(slot);
+        self.res = (self.res - spell.cost + spell.gain).clamp(0.0, MAX_RES);
+        self.cds[slot] = spell.cooldown;
+    }
+
+    /// Advance a cast. Moving, a stun or a silence breaks it; returns the slot when it completes.
+    pub fn advance(&mut self, dt: f32, moving: bool) -> Option<usize> {
+        let c = self.casting.as_mut()?;
+        if moving || self.cc.silenced() || self.dead {
+            self.casting = None;
+            return None;
+        }
+        c.left -= dt;
+        if c.left <= 0.0 {
+            let slot = c.slot;
+            self.casting = None;
+            self.pay(slot);
+            Some(slot)
+        } else {
+            None
+        }
+    }
+
+    /// Time passes: cooldowns, controls, resource, and auras ticking. Returns what the ticks did.
+    pub fn tick(&mut self, dt: f32) -> Vec<Feedback> {
+        let mut out = Vec::new();
+        if self.dead {
+            return out;
+        }
+        for cd in &mut self.cds {
+            *cd = (*cd - dt).max(0.0);
+        }
+        self.gcd = (self.gcd - dt).max(0.0);
+        self.immune_t = (self.immune_t - dt).max(0.0);
+        self.trinket_cd = (self.trinket_cd - dt).max(0.0);
+        self.cc.tick(dt);
+        let regen = match self.class.resource {
+            Resource::Mana => 1.2,
+            Resource::Energy => 10.0,
+            Resource::Rage => -0.5,
+        };
+        self.res = (self.res + regen * dt).clamp(0.0, MAX_RES);
+        let mut dot = 0.0;
+        let mut hot = 0.0;
+        let mut school = School::Physical;
+        for a in &mut self.auras {
+            a.left -= dt;
+            a.tick -= dt;
+            if a.tick <= 0.0 && a.left > -1e-3 {
+                a.tick += 1.0;
+                match a.def.kind {
+                    AuraKind::Dot(d) => {
+                        dot += d;
+                        school = a.school;
+                    }
+                    AuraKind::Hot(h) => hot += h,
+                    _ => {}
+                }
+            }
+        }
+        self.auras.retain(|a| a.left > 0.0 && !(matches!(a.def.kind, AuraKind::Absorb(_)) && a.pool <= 0.0));
+        if dot > 0.0 {
+            out.extend(self.take(dot, school, false));
+        }
+        if hot > 0.0 {
+            out.push(Feedback::Heal(self.mend(hot)));
+        }
+        out
+    }
+
+    /// Take damage through immunity, modifiers and absorbs; it breaks incapacitates, builds rage
+    /// and may kill.
+    pub fn take(&mut self, raw: f32, school: School, crit: bool) -> Vec<Feedback> {
+        if self.dead || raw <= 0.0 {
+            return Vec::new();
+        }
+        if self.immune_t > 0.0 {
+            return vec![Feedback::Immune];
+        }
+        let mut dmg = raw * self.taken();
+        let mut absorbed = 0.0;
+        for a in &mut self.auras {
+            if let AuraKind::Absorb(_) = a.def.kind {
+                let take = dmg.min(a.pool);
+                a.pool -= take;
+                dmg -= take;
+                absorbed += take;
+            }
+        }
+        let mut out = Vec::new();
+        if absorbed > 0.0 {
+            out.push(Feedback::Absorbed(absorbed));
+        }
+        if dmg > 0.0 {
+            self.hp -= dmg;
+            self.cc.hurt();
+            if self.class.resource == Resource::Rage {
+                self.res = (self.res + dmg * 0.25).min(MAX_RES);
+            }
+            out.push(Feedback::Damage { amount: dmg, crit, school });
+            if self.hp <= 0.0 {
+                self.hp = 0.0;
+                self.dead = true;
+                self.casting = None;
+                self.auras.clear();
+            }
+        }
+        out
+    }
+
+    /// Heal, capped at full; returns what took.
+    pub fn mend(&mut self, amount: f32) -> f32 {
+        if self.dead {
+            return 0.0;
+        }
+        let before = self.hp;
+        self.hp = (self.hp + amount).min(self.max_hp);
+        self.hp - before
+    }
+
+    /// The trinket: every control and snare gone.
+    pub fn trinket(&mut self) -> bool {
+        if self.dead || self.trinket_cd > 0.0 || !self.cc.any() {
+            return false;
+        }
+        self.cc.clear();
+        self.trinket_cd = TRINKET_COOLDOWN;
+        true
+    }
+
+    /// Effects that land on yourself as the ability goes off: immunity, the blink's freeing.
+    pub fn on_self(&mut self, spell: &Spell) {
+        match spell.special {
+            Special::Immune(t) => {
+                self.immune_t = t;
+                self.cc.clear();
+                self.auras.retain(|a| !a.harmful);
+                self.casting = None;
+            }
+            Special::Blink(_) | Special::Leap(_) => {
+                self.cc.stun_t = 0.0;
+                self.cc.root_t = 0.0;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The caster's side of a landing.
+#[derive(Clone, Copy, Debug)]
+pub struct Source {
+    pub dealt: f32,
+    pub crit: bool,
+    pub from: Pt,
+    pub hostile: bool,
+}
+
+/// Land `spell` on `target`. Returns the feedback and any healing owed to the caster (a drain).
+pub fn land(spell: &'static Spell, src: Source, target: &mut Unit) -> (Vec<Feedback>, f32) {
+    let mut out = Vec::new();
+    let mut drain = 0.0;
+    if target.dead {
+        return (out, 0.0);
+    }
+    if src.hostile && target.immune_t > 0.0 {
+        return (vec![Feedback::Immune], 0.0);
+    }
+    if spell.damage > 0.0 {
+        let mut d = spell.damage * src.dealt;
+        match spell.special {
+            Special::Shatter(m) if target.cc.frozen() => d *= m,
+            Special::Execute(f) if target.hp_frac() <= f => d = d.max(target.hp / target.taken().max(0.01)),
+            _ => {}
+        }
+        if src.crit {
+            d *= 1.5;
+        }
+        let fb = target.take(d, spell.school, src.crit);
+        if let Special::Drain(f) = spell.special {
+            drain = fb
+                .iter()
+                .map(|f| if let Feedback::Damage { amount, .. } = f { *amount } else { 0.0 })
+                .sum::<f32>()
+                * f;
+        }
+        out.extend(fb);
+    }
+    if spell.heal > 0.0 {
+        let h = spell.heal * if src.crit { 1.5 } else { 1.0 };
+        out.push(Feedback::Heal(target.mend(h)));
+    }
+    if let Some(def) = spell.aura {
+        target.auras.retain(|a| a.name != spell.name);
+        let pool = if let AuraKind::Absorb(p) = def.kind { p } else { 0.0 };
+        target.auras.push(Aura {
+            def,
+            name: spell.name,
+            school: spell.school,
+            left: def.secs,
+            tick: 1.0,
+            pool,
+            harmful: src.hostile,
+        });
+    }
+    if let Some(ctl) = spell.ctl {
+        if !target.dead {
+            let was_casting = target.casting.is_some();
+            match target.cc.land(ctl, 1.0, src.from) {
+                Landed::Immune => out.push(Feedback::Immune),
+                Landed::For(_) => {
+                    if was_casting && target.cc.silenced() {
+                        target.casting = None;
+                        out.push(Feedback::Interrupted);
+                    } else {
+                        out.push(Feedback::Ctl(ctl));
+                    }
+                }
+                Landed::Not => out.push(Feedback::Ctl(ctl)),
+            }
+        }
+    }
+    if spell.special == Special::Cleanse {
+        let held = target.cc;
+        target.cc.fear_t = 0.0;
+        target.cc.incap_t = 0.0;
+        target.cc.root_t = 0.0;
+        target.cc.silence_t = 0.0;
+        target.cc.slow_t = 0.0;
+        let before = target.auras.len();
+        target.auras.retain(|a| !a.harmful);
+        if held.any() || target.auras.len() != before {
+            out.push(Feedback::Cleansed);
+        }
+    }
+    (out, drain)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spells::class;
+
+    fn at(dist: f32) -> Situation {
+        Situation {
+            target: Some(TargetInfo { hostile: true, dist, sight: true, ahead: true, dead: false }),
+            moving: false,
+        }
+    }
+
+    fn slot(u: &Unit, key: &str) -> usize {
+        u.class.spells.iter().position(|s| s.key == key).unwrap()
+    }
+
+    const HIT: Source = Source { dealt: 1.0, crit: false, from: [0.0, 0.0], hostile: true };
+
+    #[test]
+    fn casting_needs_range_sight_facing_and_stillness() {
+        let mage = Unit::new(class("arcanist"));
+        let lance = slot(&mage, "frost_lance");
+        assert_eq!(mage.check(lance, at(10.0)), Ok(()));
+        assert_eq!(mage.check(lance, at(45.0)), Err(Fail::OutOfRange));
+        let mut s = at(10.0);
+        s.moving = true;
+        assert_eq!(mage.check(lance, s), Err(Fail::Moving));
+        let mut s = at(10.0);
+        s.target.as_mut().unwrap().sight = false;
+        assert_eq!(mage.check(lance, s), Err(Fail::NoSight));
+        let mut s = at(10.0);
+        s.target.as_mut().unwrap().ahead = false;
+        assert_eq!(mage.check(lance, s), Err(Fail::Facing));
+        assert_eq!(mage.check(lance, Situation { target: None, moving: false }), Err(Fail::NoTarget));
+    }
+
+    #[test]
+    fn a_cast_completes_pays_and_respects_the_gcd() {
+        let mut mage = Unit::new(class("arcanist"));
+        let lance = slot(&mage, "frost_lance");
+        assert!(!mage.begin(lance));
+        assert_eq!(mage.check(lance, at(10.0)), Err(Fail::NotReady));
+        assert_eq!(mage.advance(1.0, false), None);
+        assert_eq!(mage.advance(1.1, false), Some(lance));
+        assert!(mage.res < MAX_RES);
+    }
+
+    #[test]
+    fn moving_or_a_kick_breaks_a_cast() {
+        let mut mage = Unit::new(class("arcanist"));
+        let lance = slot(&mage, "frost_lance");
+        mage.begin(lance);
+        assert_eq!(mage.advance(0.5, true), None);
+        assert!(mage.casting.is_none());
+        mage.gcd = 0.0;
+        mage.begin(lance);
+        let rogue = Unit::new(class("shadowblade"));
+        let kick = rogue.spell(slot(&rogue, "throat_jab"));
+        let (fb, _) = land(kick, HIT, &mut mage);
+        assert!(fb.contains(&Feedback::Interrupted));
+        assert!(mage.casting.is_none());
+        mage.gcd = 0.0;
+        assert_eq!(mage.check(lance, at(10.0)), Err(Fail::Silenced));
+    }
+
+    #[test]
+    fn absorbs_and_immunity_soak_damage() {
+        let mut u = Unit::new(class("vanguard"));
+        let healer = Unit::new(class("mystic"));
+        let ward = healer.spell(slot(&healer, "ward_of_light"));
+        land(ward, Source { hostile: false, ..HIT }, &mut u);
+        let fb = u.take(30.0, School::Fire, false);
+        assert_eq!(fb, vec![Feedback::Absorbed(30.0)]);
+        assert_eq!(u.hp, u.max_hp);
+        u.immune_t = 1.0;
+        assert_eq!(u.take(500.0, School::Fire, false), vec![Feedback::Immune]);
+        u.immune_t = 0.0;
+        u.take(5000.0, School::Fire, false);
+        assert!(u.dead);
+    }
+
+    #[test]
+    fn dots_tick_and_a_cleanse_lifts_them() {
+        let mut u = Unit::new(class("vanguard"));
+        let rogue = Unit::new(class("shadowblade"));
+        let venom = rogue.spell(slot(&rogue, "venom_burst"));
+        land(venom, HIT, &mut u);
+        let hp = u.hp;
+        u.tick(1.0);
+        assert!(u.hp < hp);
+        let healer = Unit::new(class("mystic"));
+        let cleanse = healer.spell(slot(&healer, "cleanse"));
+        let (fb, _) = land(cleanse, Source { hostile: false, ..HIT }, &mut u);
+        assert!(fb.contains(&Feedback::Cleansed));
+        assert!(u.auras.is_empty());
+    }
+
+    #[test]
+    fn a_stunned_unit_can_only_use_what_is_free() {
+        let mut mage = Unit::new(class("arcanist"));
+        mage.cc.land(Ctl::Stun(4.0), 1.0, [0.0; 2]);
+        assert_eq!(mage.check(slot(&mage, "frost_lance"), at(10.0)), Err(Fail::Held));
+        let tomb = slot(&mage, "crystal_tomb");
+        assert_eq!(mage.check(tomb, at(10.0)), Ok(()));
+        mage.on_self(mage.spell(tomb));
+        assert!(!mage.cc.any() && mage.immune_t > 0.0);
+        assert!(!mage.trinket(), "nothing left to break");
+    }
+
+    #[test]
+    fn rage_builds_from_blows_and_hits() {
+        let mut v = Unit::new(class("vanguard"));
+        assert_eq!(v.res, 0.0);
+        let strike = slot(&v, "steel_strike");
+        v.begin(strike);
+        assert!(v.res > 0.0);
+        let r = v.res;
+        v.take(40.0, School::Physical, false);
+        assert!(v.res > r);
+    }
+}

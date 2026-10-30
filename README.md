@@ -1,0 +1,42 @@
+# Ember Arena
+
+Team arena battles, 1v1 / 2v2 / 3v3. Pick a class, target with Tab or a click, cast your ten
+abilities from the action bar, play the pillars for line of sight, and be the last team standing.
+Teammates and opponents are computer-controlled for now; the rules are engine-free
+(`crates/rules`) so a multiplayer server can run them later.
+
+## Run it
+
+Double-click `play.bat`, or `cargo run -p game`. Needs Rust (the pinned toolchain installs itself).
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| W / S | Forward / back |
+| A / D | Strafe left / right |
+| Right mouse drag | Turn camera and character |
+| Left mouse drag | Look around freely |
+| Both mouse buttons | Run forward |
+| Mouse wheel | Zoom |
+| Tab / click | Target an enemy / any fighter |
+| F1 - F3 | Target yourself / party |
+| 1 - 0 | Abilities (or click the bar) |
+| Q | Trinket: break every control |
+| Esc | Clear target, then pause |
+
+## Classes
+
+Vanguard (rage, plate), Berserker (rage, great axe), Arcanist (mana, frost and fire),
+Shadowblade (energy, knives), Ranger (mana, crossbow), Mystic (mana, healer).
+
+## Art
+
+All 3D art is CC0 by Kay Lousberg (KayKit Character Pack: Adventurers, KayKit Dungeon
+Remastered), from the official KayKit GitHub repositories; licenses in
+`crates/game/assets/licenses`. Spell effects and UI are the game's own.
+
+## Testing
+
+`cargo test -p rules`. `EMBER_AUTO=<class> cargo run -p game` plays a match by itself and saves
+screenshots (see `crates/game/src/auto.rs`).
