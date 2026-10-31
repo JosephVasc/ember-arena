@@ -15,6 +15,7 @@ Double-click `play.bat`, or `cargo run -p game`. Needs Rust (the pinned toolchai
 | --- | --- |
 | W / S | Forward / back |
 | A / D | Strafe left / right |
+| Space | Jump (breaks a cast) |
 | Right mouse drag | Turn camera and character |
 | Left mouse drag | Look around freely |
 | Both mouse buttons | Run forward |
@@ -24,6 +25,12 @@ Double-click `play.bat`, or `cargo run -p game`. Needs Rust (the pinned toolchai
 | 1 - 0 | Abilities (or click the bar) |
 | Q | Trinket: break every control |
 | Esc | Clear target, then pause |
+
+Every key can be rebound: **Keybinds & settings** on the menu or the pause screen (Esc).
+Bindings save to `%APPDATA%\EmberArena\settings.txt`.
+
+The minimap (top right) shows the ring, its pillars, friends (green), foes (red) and your
+target (outlined). The button under it, or the settings screen, makes it turn with you.
 
 ## Classes
 

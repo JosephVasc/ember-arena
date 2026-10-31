@@ -10,6 +10,7 @@ use crate::camera::MainCam;
 use crate::fight::{Fighter, Match, situation};
 use crate::fx;
 use crate::input::{Errors, Press};
+use crate::settings::{Action, OpenSettings, Settings, short};
 use crate::{MatchEntity, Phase, Selection, Step};
 
 pub fn plugin(app: &mut App) {
@@ -93,6 +94,9 @@ struct SlotShade(usize);
 struct SlotVeil(usize);
 #[derive(Component)]
 struct SlotTip;
+/// A slot's key label, following the bindings.
+#[derive(Component)]
+struct SlotKey(usize);
 
 const TRINKET: usize = usize::MAX;
 
@@ -219,6 +223,7 @@ fn build_screens(mut commands: Commands) {
                         col.spawn(button(MenuButton::Arena(i), a.name, a.blurb));
                     }
                     col.spawn(button(MenuButton::Enter, "Enter the Arena", "or press Enter"));
+                    col.spawn((OpenSettings, Button, Node { padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)), border: UiRect::all(Val::Px(1.0)), border_radius: BorderRadius::all(Val::Px(5.0)), ..default() }, BackgroundColor(IDLE), BorderColor::all(EDGE), children![label("Keybinds & settings", 16.0, Color::WHITE)]));
                 });
             root.spawn(panel(Node { flex_direction: FlexDirection::Column, padding: UiRect::all(Val::Px(14.0)), width: Val::Px(520.0), align_self: AlignSelf::FlexStart, ..default() }))
                 .with_children(|col| {
@@ -248,7 +253,7 @@ fn build_screens(mut commands: Commands) {
                     frame(row, Who::Target, 220.0);
                 });
             // The enemy team, top right.
-            root.spawn(Node { position_type: PositionType::Absolute, right: Val::Px(12.0), top: Val::Px(70.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(8.0), ..default() })
+            root.spawn(Node { position_type: PositionType::Absolute, right: Val::Px(12.0), top: Val::Px(240.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(8.0), ..default() })
                 .with_children(|col| {
                     for i in 0..3 {
                         frame(col, Who::Enemy(i), 180.0);
@@ -263,8 +268,6 @@ fn build_screens(mut commands: Commands) {
                 Node { position_type: PositionType::Absolute, top: Val::Percent(30.0), width: Val::Percent(100.0), justify_content: JustifyContent::Center, ..default() },
                 children![(label("", 40.0, GOLD), CenterText)],
             ));
-            root.spawn(label("W/S move  A/D strafe  Right-drag steer  Tab target  1-0 cast  Q trinket", 13.0, DIM))
-                .insert(Node { position_type: PositionType::Absolute, right: Val::Px(12.0), top: Val::Px(12.0), ..default() });
             // Your cast bar and the action bar, bottom centre.
             root.spawn(Node {
                 position_type: PositionType::Absolute,
@@ -280,9 +283,9 @@ fn build_screens(mut commands: Commands) {
                 bar(col, Who::Player, Part::Cast, 300.0, 16.0, CAST, Some(Part::CastText));
                 col.spawn(Node { column_gap: Val::Px(5.0), ..default() }).with_children(|row| {
                     for i in 0..10 {
-                        slot(row, i, if i == 9 { "0".into() } else { format!("{}", i + 1) });
+                        slot(row, i);
                     }
-                    slot(row, TRINKET, "Q".into());
+                    slot(row, TRINKET);
                 });
             });
         });
@@ -292,7 +295,11 @@ fn build_screens(mut commands: Commands) {
         Node { justify_content: JustifyContent::Center, align_items: AlignItems::Center, flex_direction: FlexDirection::Column, ..full(Display::None) },
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
         GlobalZIndex(10),
-        children![label("PAUSED", 44.0, GOLD), label("Esc to fight on   M to leave the arena", 18.0, DIM)],
+        children![
+            label("PAUSED", 44.0, GOLD),
+            label("Esc to fight on   M to leave the arena", 18.0, DIM),
+            (OpenSettings, Button, Node { margin: UiRect::top(Val::Px(12.0)), padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)), border: UiRect::all(Val::Px(1.0)), border_radius: BorderRadius::all(Val::Px(5.0)), ..default() }, BackgroundColor(IDLE), BorderColor::all(EDGE), children![label("Keybinds & settings", 16.0, Color::WHITE)]),
+        ],
     ));
     commands.spawn((
         ResultsRoot,
@@ -303,7 +310,7 @@ fn build_screens(mut commands: Commands) {
     ));
 }
 
-fn slot(row: &mut ChildSpawnerCommands, i: usize, key: String) {
+fn slot(row: &mut ChildSpawnerCommands, i: usize) {
     row.spawn((
         Slot(i),
         Button,
@@ -323,7 +330,7 @@ fn slot(row: &mut ChildSpawnerCommands, i: usize, key: String) {
         s.spawn((Slot(i), label("", 20.0, Color::WHITE)));
         s.spawn((SlotVeil(i), Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() }, BackgroundColor(Color::NONE)));
         s.spawn((SlotShade(i), Node { position_type: PositionType::Absolute, bottom: Val::Px(0.0), width: Val::Percent(100.0), height: Val::Percent(0.0), ..default() }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7))));
-        s.spawn((Node { position_type: PositionType::Absolute, top: Val::Px(1.0), right: Val::Px(3.0), ..default() }, label(key, 11.0, DIM)));
+        s.spawn((SlotKey(i), Node { position_type: PositionType::Absolute, top: Val::Px(1.0), right: Val::Px(3.0), ..default() }, label("", 11.0, DIM)));
     });
 }
 
@@ -439,8 +446,9 @@ fn menu_input(
     presses: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
     mut sel: ResMut<Selection>,
     mut next: ResMut<NextState<Phase>>,
+    overlay: Res<crate::settings::Overlay>,
 ) {
-    if *phase.get() != Phase::Menu {
+    if *phase.get() != Phase::Menu || overlay.open {
         return;
     }
     let mut enter = keys.just_pressed(KeyCode::Enter);
@@ -584,14 +592,23 @@ fn fill(part: Part, f: Option<&Fighter>, my_team: usize, node: Option<Mut<Node>>
 #[allow(clippy::type_complexity)]
 fn action_bar(
     sel: Res<Selection>,
+    settings: Res<Settings>,
+    mut keys: Query<(&SlotKey, &mut Text), (Without<Slot>, Without<SlotTip>)>,
     fighters: Query<(Entity, &Fighter, &Transform)>,
     hovered: Query<(&Slot, &Interaction), With<Button>>,
-    mut glyphs: Query<(&Slot, &mut Text), Without<Button>>,
+    mut glyphs: Query<(&Slot, &mut Text), (Without<Button>, Without<SlotKey>)>,
     mut buttons: Query<(&Slot, &mut BorderColor), With<Button>>,
     mut shades: Query<(&SlotShade, &mut Node)>,
     mut veils: Query<(&SlotVeil, &mut BackgroundColor)>,
-    mut tip: Query<&mut Text, (With<SlotTip>, Without<Slot>)>,
+    mut tip: Query<&mut Text, (With<SlotTip>, Without<Slot>, Without<SlotKey>)>,
 ) {
+    for (k, mut t) in &mut keys {
+        let a = if k.0 == TRINKET { Action::Trinket } else { Action::Ability(k.0) };
+        let s = short(settings.key(a));
+        if t.0 != s {
+            t.0 = s;
+        }
+    }
     let Some((_, me, tf)) = fighters.iter().find(|(_, f, _)| f.player) else { return };
     let u = &me.unit;
     let target = me.target.and_then(|t| fighters.get(t).ok()).map(|(_, f, t)| (f, t));

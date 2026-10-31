@@ -34,6 +34,10 @@ impl Default for Cam {
     }
 }
 
+/// How tall the pillars and the wall stand (see `arena`): above them the camera passes freely.
+const PILLAR_TOP: f32 = 6.4;
+const WALL_TOP: f32 = 5.0;
+
 pub const PITCH_MIN: f32 = -0.25;
 pub const PITCH_MAX: f32 = 1.35;
 
@@ -84,7 +88,25 @@ fn place(
     }
     let look = focus.0 + Vec3::Y * 1.6;
     let back = -cam.forward() * cam.pitch.cos() + Vec3::Y * cam.pitch.sin();
-    let mut eye = look + back * cam.dist;
+    // Like WoW's, the camera pulls in rather than sink into a pillar or behind the wall.
+    let arena = sel.arena();
+    let blocked = |p: Vec3| {
+        let inside_pillar = arena.pillars.iter().any(|&([x, z], r)| {
+            p.y < PILLAR_TOP && Vec2::new(p.x - x, p.z - z).length() < r + 0.5
+        });
+        let past_wall = p.y < WALL_TOP && Vec2::new(p.x, p.z).length() > arena.radius - 0.5;
+        inside_pillar || past_wall
+    };
+    const STEPS: usize = 48;
+    let mut dist = cam.dist;
+    for i in 1..=STEPS {
+        let t = cam.dist * i as f32 / STEPS as f32;
+        if blocked(look + back * t) {
+            dist = (t - cam.dist / STEPS as f32 - 0.3).max(1.0);
+            break;
+        }
+    }
+    let mut eye = look + back * dist;
     // Never under the floor.
     eye.y = eye.y.max(0.4);
     *tf = Transform::from_translation(eye).looking_at(look, Vec3::Y);

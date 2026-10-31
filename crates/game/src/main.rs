@@ -9,6 +9,8 @@ mod camera;
 mod fight;
 mod fx;
 mod input;
+mod minimap;
+mod settings;
 mod ui;
 
 use bevy::prelude::*;
@@ -37,6 +39,8 @@ fn main() {
             fx::plugin,
             ui::plugin,
             auto::plugin,
+            settings::plugin,
+            minimap::plugin,
         ))
         .add_systems(OnEnter(Phase::Paused), |mut t: ResMut<Time<Virtual>>| t.pause())
         .add_systems(OnExit(Phase::Paused), |mut t: ResMut<Time<Virtual>>| t.unpause())

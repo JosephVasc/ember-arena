@@ -1,6 +1,7 @@
-//! Your hands: WoW-style movement and camera, targeting, and the action bar.
+//! Your hands: WoW-style movement and camera, targeting, and the action bar. Every key comes from
+//! [`Settings`] (rebindable); the defaults:
 //!
-//! - W / S: forward and back; A / D: strafe; both mouse buttons: run forward.
+//! - W / S: forward and back; A / D: strafe; Space: jump; both mouse buttons: run forward.
 //! - Right drag: turn the camera and your character with it. Left drag: look around freely.
 //! - Wheel: zoom. Tab: next enemy. Click a fighter: target it. F1-F3: yourself and your party.
 //! - 1-0: your abilities. Q: trinket. Esc: clear target, then pause.
@@ -12,7 +13,9 @@ use rules::unit::Fail;
 
 use crate::camera::{Cam, MainCam, PITCH_MAX, PITCH_MIN};
 use crate::fight::{BODY, Fighter, Release, SPEED, Stride, situation, start};
+use crate::art::{Anim, Clip};
 use crate::fx::{self, Fx};
+use crate::settings::{Action, Overlay, Settings};
 use crate::{Phase, Selection, Step, at, flat, pt, yaw};
 
 pub fn plugin(app: &mut App) {
@@ -39,21 +42,9 @@ struct Drag(f32);
 #[derive(Message, Clone, Copy)]
 pub struct Press(pub usize);
 
-pub const KEYS: [KeyCode; 10] = [
-    KeyCode::Digit1,
-    KeyCode::Digit2,
-    KeyCode::Digit3,
-    KeyCode::Digit4,
-    KeyCode::Digit5,
-    KeyCode::Digit6,
-    KeyCode::Digit7,
-    KeyCode::Digit8,
-    KeyCode::Digit9,
-    KeyCode::Digit0,
-];
-pub const TRINKET: KeyCode = KeyCode::KeyQ;
-
 const TURN: f32 = 0.006;
+/// A jump's upward speed, yards a second.
+pub const JUMP: f32 = 8.0;
 
 fn camera(
     mouse: Res<ButtonInput<MouseButton>>,
@@ -84,10 +75,11 @@ fn move_player(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     sel: Res<Selection>,
-    mut fighters: Query<(&mut Fighter, &mut Transform)>,
+    settings: Res<Settings>,
+    mut fighters: Query<(&mut Fighter, &mut Transform, &mut Anim)>,
 ) {
     let dt = time.delta_secs();
-    let Some((mut f, mut tf)) = fighters.iter_mut().find(|(f, _)| f.player) else { return };
+    let Some((mut f, mut tf, mut anim)) = fighters.iter_mut().find(|(f, _, _)| f.player) else { return };
     f.stride = Stride::Still;
     if f.unit.dead {
         return;
@@ -96,20 +88,26 @@ fn move_player(
     let right = Vec3::new(-fwd.z, 0.0, fwd.x);
     let both = mouse.pressed(MouseButton::Left) && mouse.pressed(MouseButton::Right);
     let mut dir = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) || both {
+    if settings.pressed(&keys, Action::Forward) || both {
         dir += fwd;
     }
-    if keys.pressed(KeyCode::KeyS) {
+    if settings.pressed(&keys, Action::Back) {
         dir -= fwd;
     }
-    // A and D strafe; the models' +X is their left.
-    if keys.pressed(KeyCode::KeyA) {
+    // Strafing runs along the screen's sideways line.
+    if settings.pressed(&keys, Action::StrafeLeft) {
         dir -= right;
     }
-    if keys.pressed(KeyCode::KeyD) {
+    if settings.pressed(&keys, Action::StrafeRight) {
         dir += right;
     }
     let cc = f.unit.cc;
+    // A jump from the ground, unless something holds you.
+    if settings.just(&keys, Action::Jump) && f.air <= 0.0 && !cc.held() && !cc.out() {
+        f.vy = JUMP;
+        f.air = 0.01;
+        anim.play(Clip::Jump, 0.9);
+    }
     if cc.fear_t > 0.0 {
         dir = flat(tf.translation - at(cc.from)).normalize_or(fwd);
         tf.rotation = yaw(dir);
@@ -138,6 +136,7 @@ fn move_player(
 #[allow(clippy::too_many_arguments)]
 fn targeting(
     keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<Settings>,
     mouse: Res<ButtonInput<MouseButton>>,
     drag: Res<Drag>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -153,7 +152,7 @@ fn targeting(
         return;
     };
     let mut pick: Option<Option<Entity>> = None;
-    if keys.just_pressed(KeyCode::Tab) {
+    if settings.just(&keys, Action::NextTarget) {
         // The nearest living enemy in front, cycling past the current target.
         let current = fighters.get(me).ok().and_then(|(_, f, _)| f.target);
         let mut foes: Vec<(f32, Entity)> = fighters
@@ -172,8 +171,8 @@ fn targeting(
         };
         pick = next.map(|x| Some(x.1));
     }
-    for (i, k) in [KeyCode::F1, KeyCode::F2, KeyCode::F3].into_iter().enumerate() {
-        if keys.just_pressed(k) {
+    for (i, a) in [Action::TargetSelf, Action::TargetParty1, Action::TargetParty2].into_iter().enumerate() {
+        if settings.just(&keys, a) {
             let mut party: Vec<(usize, Entity)> = fighters
                 .iter()
                 .filter(|(_, f, _)| f.team == my_team)
@@ -216,6 +215,7 @@ fn targeting(
 fn cast_keys(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<Settings>,
     phase: Res<State<Phase>>,
     sel: Res<Selection>,
     mut presses: MessageReader<Press>,
@@ -231,8 +231,8 @@ fn cast_keys(
         }
     }
     let mut want: Vec<usize> = presses.read().map(|p| p.0).collect();
-    want.extend(KEYS.iter().enumerate().filter(|(_, k)| keys.just_pressed(**k)).map(|(i, _)| i));
-    if keys.just_pressed(TRINKET) {
+    want.extend((0..10).filter(|&i| settings.just(&keys, Action::Ability(i))));
+    if settings.just(&keys, Action::Trinket) {
         want.push(usize::MAX);
     }
     if want.is_empty() {
@@ -259,7 +259,7 @@ fn cast_keys(
             continue;
         }
         let target = f.target;
-        let moving = f.stride != Stride::Still;
+        let moving = f.stride != Stride::Still || f.air > 0.0;
         let target_info = target.and_then(|t| fighters.get(t).ok()).map(|(_, tf_f, ttf)| (tf_f, ttf));
         let s = situation(sel.arena(), (f, tf), target_info, moving, false);
         match f.unit.check(slot, s) {
@@ -277,8 +277,16 @@ fn pause_keys(
     keys: Res<ButtonInput<KeyCode>>,
     phase: Res<State<Phase>>,
     fighters: Query<&Fighter>,
+    mut overlay: ResMut<Overlay>,
     mut next: ResMut<NextState<Phase>>,
 ) {
+    // The Keybinds screen takes Esc first: to cancel a capture, else to close.
+    if overlay.open {
+        if keys.just_pressed(KeyCode::Escape) && !overlay.capturing() {
+            overlay.open = false;
+        }
+        return;
+    }
     match phase.get() {
         // Esc clears a target first (see `targeting`); with none, it pauses.
         Phase::Fight | Phase::Gates if keys.just_pressed(KeyCode::Escape) => {

@@ -83,10 +83,11 @@ pub enum Clip {
     StrafeLeft,
     StrafeRight,
     Back,
+    Jump,
 }
 
 impl Clip {
-    const ALL: [Clip; 15] = [
+    const ALL: [Clip; 16] = [
         Clip::Idle,
         Clip::Run,
         Clip::Death,
@@ -102,6 +103,7 @@ impl Clip {
         Clip::StrafeLeft,
         Clip::StrafeRight,
         Clip::Back,
+        Clip::Jump,
     ];
 
     fn name(self) -> &'static str {
@@ -121,6 +123,7 @@ impl Clip {
             Clip::StrafeLeft => "Running_Strafe_Left",
             Clip::StrafeRight => "Running_Strafe_Right",
             Clip::Back => "Walking_Backwards",
+            Clip::Jump => "Jump_Full_Short",
         }
     }
 

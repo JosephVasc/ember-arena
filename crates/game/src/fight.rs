@@ -26,7 +26,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, think.in_set(Step::Think).run_if(in_state(Phase::Fight)))
         .add_systems(
             Update,
-            (steer, advance, resolve, fly, arrive, deaths, verdict)
+            (steer, gravity, advance, resolve, fly, arrive, deaths, verdict)
                 .chain()
                 .in_set(Step::Resolve)
                 .run_if(in_state(Phase::Fight).or(in_state(Phase::Gates))),
@@ -69,6 +69,9 @@ pub struct Fighter {
     pub brain: Brain,
     pub goal: Option<rules::Pt>,
     pub stride: Stride,
+    /// Height above the floor while jumping, and the upward speed.
+    pub air: f32,
+    pub vy: f32,
 }
 
 impl Fighter {
@@ -171,6 +174,8 @@ fn spawn_match(
                         brain: Brain::default(),
                         goal: None,
                         stride: Stride::Still,
+                        air: 0.0,
+                        vy: 0.0,
                     },
                 ))
                 .observe(art::on_ready)
@@ -350,7 +355,26 @@ fn steer(
     }
 }
 
-/// Casts run down (moving breaks them), auras tick, and a finished cast goes off.
+/// Pulls you down from a jump.
+pub const GRAVITY: f32 = 20.0;
+
+/// Jumps rise and fall; whatever moved a fighter along the floor, it stands at its jump height.
+fn gravity(time: Res<Time>, mut fighters: Query<(&mut Fighter, &mut Transform)>) {
+    let dt = time.delta_secs();
+    for (mut f, mut tf) in &mut fighters {
+        if f.air > 0.0 || f.vy > 0.0 {
+            f.vy -= GRAVITY * dt;
+            f.air += f.vy * dt;
+            if f.air <= 0.0 {
+                f.air = 0.0;
+                f.vy = 0.0;
+            }
+        }
+        tf.translation.y = f.air;
+    }
+}
+
+/// Casts run down (moving or jumping breaks them), auras tick, and a finished cast goes off.
 fn advance(
     time: Res<Time>,
     mut state: ResMut<Match>,
@@ -361,7 +385,7 @@ fn advance(
     let dt = time.delta_secs();
     state.elapsed += dt;
     for (e, mut f, tf) in &mut fighters {
-        let moving = f.stride != Stride::Still;
+        let moving = f.stride != Stride::Still || f.air > 0.0;
         if let Some(slot) = f.unit.advance(dt, moving) {
             let target = f.cast_target.take();
             out.write(Release { caster: e, slot, target });
