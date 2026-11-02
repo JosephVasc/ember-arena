@@ -10,6 +10,8 @@ use crate::spells::{Aim, AuraDef, AuraKind, Class, GCD, Resource, School, Specia
 #[derive(Clone, Copy, Debug)]
 pub struct Aura {
     pub def: AuraDef,
+    /// The ability it came from.
+    pub key: &'static str,
     pub name: &'static str,
     pub school: School,
     pub left: f32,
@@ -18,6 +20,30 @@ pub struct Aura {
     pub pool: f32,
     /// Placed by an enemy: a cleanse removes it.
     pub harmful: bool,
+}
+
+/// A control on a unit and the ability that laid it, for showing it; the seconds left are always
+/// the unit's own timers.
+#[derive(Clone, Copy, Debug)]
+struct Mark {
+    ctl: Ctl,
+    key: &'static str,
+    name: &'static str,
+    school: School,
+    total: f32,
+}
+
+/// Something harmful on a unit, as a player sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Debuff {
+    /// The ability behind it.
+    pub key: &'static str,
+    pub name: &'static str,
+    pub school: School,
+    pub left: f32,
+    pub total: f32,
+    /// The control, or `None` for damage over time.
+    pub ctl: Option<Ctl>,
 }
 
 /// A cast under way.
@@ -99,6 +125,7 @@ pub struct Unit {
     pub max_hp: f32,
     pub res: f32,
     pub cc: Held,
+    marks: Vec<Mark>,
     pub auras: Vec<Aura>,
     pub cds: Vec<f32>,
     pub gcd: f32,
@@ -120,6 +147,7 @@ impl Unit {
             max_hp: class.health,
             res: if class.resource == Resource::Rage { 0.0 } else { MAX_RES },
             cc: Held::default(),
+            marks: Vec::new(),
             auras: Vec::new(),
             cds: vec![0.0; class.spells.len()],
             gcd: 0.0,
@@ -250,6 +278,43 @@ impl Unit {
         }
     }
 
+    /// Everything harmful on the unit now: controls first, strongest first, then the rest.
+    pub fn debuffs(&self) -> Vec<Debuff> {
+        if self.dead {
+            return Vec::new();
+        }
+        let mut out: Vec<Debuff> = self
+            .marks
+            .iter()
+            .filter_map(|m| {
+                let left = self.cc.left_of(m.ctl);
+                (left > 0.0).then_some(Debuff {
+                    key: m.key,
+                    name: m.name,
+                    school: m.school,
+                    left,
+                    total: m.total.max(left),
+                    ctl: Some(m.ctl),
+                })
+            })
+            .collect();
+        out.sort_by_key(|d| d.ctl.map_or(9, severity));
+        out.extend(self.auras.iter().filter(|a| a.harmful).map(|a| Debuff {
+            key: a.key,
+            name: a.name,
+            school: a.school,
+            left: a.left,
+            total: a.def.secs,
+            ctl: None,
+        }));
+        out
+    }
+
+    /// The control that matters most on the unit now; a snare doesn't count.
+    pub fn loss_of_control(&self) -> Option<Debuff> {
+        self.debuffs().into_iter().find(|d| d.ctl.is_some_and(|c| !matches!(c, Ctl::Slow(..))))
+    }
+
     /// Time passes: cooldowns, controls, resource, and auras ticking. Returns what the ticks did.
     pub fn tick(&mut self, dt: f32) -> Vec<Feedback> {
         let mut out = Vec::new();
@@ -375,6 +440,18 @@ impl Unit {
     }
 }
 
+/// How hard a control is, lowest first: what a player most needs to see.
+fn severity(c: Ctl) -> u8 {
+    match c {
+        Ctl::Stun(_) => 0,
+        Ctl::Incap(_) => 1,
+        Ctl::Fear(_) => 2,
+        Ctl::Silence(_) | Ctl::Interrupt(_) => 3,
+        Ctl::Root(_) => 4,
+        Ctl::Slow(..) => 5,
+    }
+}
+
 /// The caster's side of a landing.
 #[derive(Clone, Copy, Debug)]
 pub struct Source {
@@ -423,6 +500,7 @@ pub fn land(spell: &'static Spell, src: Source, target: &mut Unit) -> (Vec<Feedb
         let pool = if let AuraKind::Absorb(p) = def.kind { p } else { 0.0 };
         target.auras.push(Aura {
             def,
+            key: spell.key,
             name: spell.name,
             school: spell.school,
             left: def.secs,
@@ -434,7 +512,20 @@ pub fn land(spell: &'static Spell, src: Source, target: &mut Unit) -> (Vec<Feedb
     if let Some(ctl) = spell.ctl {
         if !target.dead {
             let was_casting = target.casting.is_some();
-            match target.cc.land(ctl, 1.0, src.from) {
+            let landed = target.cc.land(ctl, 1.0, src.from);
+            let total = match (landed, ctl) {
+                (Landed::For(t), _) | (Landed::Not, Ctl::Slow(_, t)) => Some(t),
+                _ => None,
+            };
+            if let Some(total) = total {
+                // One mark a timer: a silence and a kick share theirs.
+                let left = target.cc.left_of(ctl);
+                let same_timer = |m: &Mark| std::mem::discriminant(&m.ctl) == std::mem::discriminant(&ctl)
+                    || (matches!(m.ctl, Ctl::Silence(_) | Ctl::Interrupt(_)) && matches!(ctl, Ctl::Silence(_) | Ctl::Interrupt(_)));
+                target.marks.retain(|m| !same_timer(m));
+                target.marks.push(Mark { ctl, key: spell.key, name: spell.name, school: spell.school, total: total.max(left) });
+            }
+            match landed {
                 Landed::Immune => out.push(Feedback::Immune),
                 Landed::For(_) => {
                     if was_casting && target.cc.silenced() {
@@ -571,6 +662,27 @@ mod tests {
         mage.on_self(mage.spell(tomb));
         assert!(!mage.cc.any() && mage.immune_t > 0.0);
         assert!(!mage.trinket(), "nothing left to break");
+    }
+
+    #[test]
+    fn debuffs_name_their_source_and_end_with_their_timers() {
+        let mut u = Unit::new(class("vanguard"));
+        let rogue = Unit::new(class("shadowblade"));
+        land(rogue.spell(slot(&rogue, "venom_burst")), HIT, &mut u);
+        land(rogue.spell(slot(&rogue, "hamstring_cut")), HIT, &mut u);
+        assert!(u.loss_of_control().is_none(), "a snare and a dot aren't loss of control");
+        land(rogue.spell(slot(&rogue, "gut_punch")), HIT, &mut u);
+        let d = u.debuffs();
+        assert_eq!(d[0].key, "gut_punch", "the stun leads");
+        assert_eq!(d.len(), 3);
+        assert_eq!(u.loss_of_control().map(|d| d.name), Some("Gut Punch"));
+        assert!((d[0].left - 5.0).abs() < 1e-3 && d[0].total == 5.0);
+        u.tick(2.0);
+        assert!((u.debuffs()[0].left - 3.0).abs() < 1e-3);
+        // A trinket ends the controls at once, whoever laid them; the dot stays.
+        assert!(u.trinket());
+        let d = u.debuffs();
+        assert_eq!((d.len(), d[0].key), (1, "venom_burst"));
     }
 
     #[test]

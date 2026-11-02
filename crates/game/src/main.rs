@@ -2,12 +2,14 @@
 //! other start at opposite gates; target with Tab or a click, cast your ten abilities from the bar,
 //! play the pillars for line of sight, and be the last team standing.
 
+mod alerts;
 mod arena;
 mod art;
 mod auto;
 mod camera;
 mod fight;
 mod fx;
+mod icons;
 mod input;
 mod minimap;
 mod settings;
@@ -37,6 +39,8 @@ fn main() {
             fight::plugin,
             input::plugin,
             fx::plugin,
+            icons::plugin,
+            alerts::plugin,
             ui::plugin,
             auto::plugin,
             settings::plugin,

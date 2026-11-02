@@ -7,7 +7,8 @@ use rules::spells::{Aim, AuraKind, Class, Resource, Special, Spell, CLASSES};
 use rules::unit::Fail;
 
 use crate::camera::MainCam;
-use crate::fight::{Fighter, Match, situation};
+use crate::fight::{Fighter, Match, Release, situation};
+use crate::icons::{self, Icons};
 use crate::fx;
 use crate::input::{Errors, Press};
 use crate::settings::{Action, OpenSettings, Settings, short};
@@ -16,7 +17,7 @@ use crate::{MatchEntity, Phase, Selection, Step};
 pub fn plugin(app: &mut App) {
     app.add_systems(Startup, build_screens).add_systems(
         Update,
-        (show_screens, menu_input, refresh_menu, frames, action_bar, slot_clicks, banners, plates, refresh_results)
+        (show_screens, menu_input, refresh_menu, frames, action_bar, slot_feedback, slot_clicks, banners, plates, refresh_results)
             .in_set(Step::Show),
     );
 }
@@ -94,6 +95,17 @@ struct SlotShade(usize);
 struct SlotVeil(usize);
 #[derive(Component)]
 struct SlotTip;
+/// A slot's icon.
+#[derive(Component)]
+struct SlotIcon(usize);
+/// The bright flash over a slot when its ability goes off.
+#[derive(Component)]
+struct SlotFlash(usize);
+/// One ability's row on the menu.
+#[derive(Component)]
+struct SpellRow(usize);
+#[derive(Component)]
+struct SpellRowIcon(usize);
 /// A slot's key label, following the bindings.
 #[derive(Component)]
 struct SlotKey(usize);
@@ -142,10 +154,6 @@ fn button(action: MenuButton, title: &str, sub: &str) -> impl Bundle {
         BorderColor::all(EDGE),
         children![label(title.to_string(), 18.0, GOLD), label(sub.to_string(), 12.0, DIM)],
     )
-}
-
-fn initials(name: &str) -> String {
-    name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect()
 }
 
 /// A bar: a dark track with a fill bound to `who`'s `part`, and an optional text over it.
@@ -227,7 +235,15 @@ fn build_screens(mut commands: Commands) {
                 });
             root.spawn(panel(Node { flex_direction: FlexDirection::Column, padding: UiRect::all(Val::Px(14.0)), width: Val::Px(520.0), align_self: AlignSelf::FlexStart, ..default() }))
                 .with_children(|col| {
-                    col.spawn((ClassInfo, label("", 14.0, Color::WHITE)));
+                    col.spawn((ClassInfo, label("", 15.0, Color::WHITE)));
+                    for i in 0..10 {
+                        col.spawn(Node { column_gap: Val::Px(8.0), margin: UiRect::top(Val::Px(5.0)), align_items: AlignItems::Center, ..default() })
+                            .with_children(|r| {
+                                r.spawn((SpellRowIcon(i), Node { width: Val::Px(38.0), height: Val::Px(38.0), flex_shrink: 0.0, ..default() }, ImageNode::default()));
+                                r.spawn((SpellRow(i), label("", 13.0, Color::WHITE)));
+                            });
+                    }
+                    col.spawn((label("Q. Trinket: breaks every control, once every 2 minutes.", 13.0, DIM), Node { margin: UiRect::top(Val::Px(6.0)), ..default() }));
                 });
         });
 
@@ -325,12 +341,15 @@ fn slot(row: &mut ChildSpawnerCommands, i: usize) {
         },
         BackgroundColor(IDLE),
         BorderColor::all(EDGE),
+        UiTransform::default(),
     ))
     .with_children(|s| {
-        s.spawn((Slot(i), label("", 20.0, Color::WHITE)));
+        let cover = || Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() };
+        s.spawn((SlotIcon(i), cover(), ImageNode::default()));
         s.spawn((SlotVeil(i), Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() }, BackgroundColor(Color::NONE)));
         s.spawn((SlotShade(i), Node { position_type: PositionType::Absolute, bottom: Val::Px(0.0), width: Val::Percent(100.0), height: Val::Percent(0.0), ..default() }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7))));
-        s.spawn((SlotKey(i), Node { position_type: PositionType::Absolute, top: Val::Px(1.0), right: Val::Px(3.0), ..default() }, label("", 11.0, DIM)));
+        s.spawn((SlotFlash(i), cover(), BackgroundColor(Color::NONE)));
+        s.spawn((SlotKey(i), Node { position_type: PositionType::Absolute, top: Val::Px(1.0), right: Val::Px(3.0), ..default() }, label("", 13.0, Color::WHITE)));
     });
 }
 
@@ -468,7 +487,15 @@ fn menu_input(
     }
 }
 
-fn refresh_menu(sel: Res<Selection>, mut buttons: Query<(&MenuButton, &mut BackgroundColor)>, mut info: Query<&mut Text, With<ClassInfo>>) {
+#[allow(clippy::type_complexity)]
+fn refresh_menu(
+    sel: Res<Selection>,
+    icons: Res<Icons>,
+    mut buttons: Query<(&MenuButton, &mut BackgroundColor)>,
+    mut info: Query<&mut Text, (With<ClassInfo>, Without<SpellRow>)>,
+    mut rows: Query<(&SpellRow, &mut Text), Without<ClassInfo>>,
+    mut pics: Query<(&SpellRowIcon, &mut ImageNode)>,
+) {
     if !sel.is_changed() {
         return;
     }
@@ -482,13 +509,14 @@ fn refresh_menu(sel: Res<Selection>, mut buttons: Query<(&MenuButton, &mut Backg
         bg.0 = if on { PICKED } else { IDLE };
     }
     let c = sel.class();
-    let mut s = format!("{} - {} - {} health\n{}\n\n", c.name, c.resource.name(), c.health, c.blurb);
-    for (i, sp) in c.spells.iter().enumerate() {
-        s += &format!("{}. {}\n", (i + 1) % 10, describe(sp));
-    }
-    s += "\nQ. Trinket: breaks every control, once every 2 minutes.";
     if let Ok(mut t) = info.single_mut() {
-        **t = s;
+        **t = format!("{} - {} - {} health\n{}", c.name, c.resource.name(), c.health, c.blurb);
+    }
+    for (r, mut t) in &mut rows {
+        t.0 = format!("{}. {}", (r.0 + 1) % 10, describe(&c.spells[r.0]));
+    }
+    for (r, mut img) in &mut pics {
+        img.image = icons.get(c.spells[r.0].key);
     }
 }
 
@@ -593,14 +621,12 @@ fn fill(part: Part, f: Option<&Fighter>, my_team: usize, node: Option<Mut<Node>>
 fn action_bar(
     sel: Res<Selection>,
     settings: Res<Settings>,
-    mut keys: Query<(&SlotKey, &mut Text), (Without<Slot>, Without<SlotTip>)>,
+    mut keys: Query<(&SlotKey, &mut Text), Without<SlotTip>>,
     fighters: Query<(Entity, &Fighter, &Transform)>,
     hovered: Query<(&Slot, &Interaction), With<Button>>,
-    mut glyphs: Query<(&Slot, &mut Text), (Without<Button>, Without<SlotKey>)>,
-    mut buttons: Query<(&Slot, &mut BorderColor), With<Button>>,
     mut shades: Query<(&SlotShade, &mut Node)>,
     mut veils: Query<(&SlotVeil, &mut BackgroundColor)>,
-    mut tip: Query<&mut Text, (With<SlotTip>, Without<Slot>, Without<SlotKey>)>,
+    mut tip: Query<&mut Text, (With<SlotTip>, Without<SlotKey>)>,
 ) {
     for (k, mut t) in &mut keys {
         let a = if k.0 == TRINKET { Action::Trinket } else { Action::Ability(k.0) };
@@ -613,16 +639,6 @@ fn action_bar(
     let u = &me.unit;
     let target = me.target.and_then(|t| fighters.get(t).ok()).map(|(_, f, t)| (f, t));
     let s = situation(sel.arena(), (me, tf), target, false, false);
-    for (slot, mut t) in &mut glyphs {
-        let g = if slot.0 == TRINKET { "PvP".to_string() } else { initials(u.spell(slot.0).name) };
-        if t.0 != g {
-            t.0 = g;
-        }
-    }
-    for (slot, mut border) in &mut buttons {
-        let c = if slot.0 == TRINKET { GOLD } else { fx::color(u.spell(slot.0).school) };
-        *border = BorderColor::all(c);
-    }
     for (shade, mut n) in &mut shades {
         let frac = if shade.0 == TRINKET {
             u.trinket_cd / rules::spells::TRINKET_COOLDOWN
@@ -649,6 +665,79 @@ fn action_bar(
             Some(i) => describe(u.spell(i)),
             None => String::new(),
         };
+    }
+}
+
+/// How long a slot's flash lasts when its ability goes off.
+const FLASH_SECS: f32 = 0.3;
+
+/// So you can feel your buttons: a held key or click sinks its slot and lights its border, the
+/// ability going off flashes it, and the one you're casting glows until it lands.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn slot_feedback(
+    time: Res<Time<Real>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<Settings>,
+    icons: Res<Icons>,
+    fighters: Query<(Entity, &Fighter)>,
+    mut fired: MessageReader<Release>,
+    mut last_fired: Local<std::collections::HashMap<usize, f32>>,
+    mut last_trinket: Local<f32>,
+    mut buttons: Query<(&Slot, &Interaction, &mut BorderColor, &mut UiTransform), With<Button>>,
+    mut pics: Query<(&SlotIcon, &mut ImageNode)>,
+    mut flashes: Query<(&SlotFlash, &mut BackgroundColor)>,
+) {
+    let Some((me, f)) = fighters.iter().find(|(_, f)| f.player) else { return };
+    let u = &f.unit;
+    let now = time.elapsed_secs();
+    for r in fired.read() {
+        if r.caster == me {
+            last_fired.insert(r.slot, now);
+        }
+    }
+    if u.trinket_cd > *last_trinket {
+        last_fired.insert(TRINKET, now);
+    }
+    *last_trinket = u.trinket_cd;
+    let key_down = |slot: usize| {
+        let a = if slot == TRINKET { Action::Trinket } else { Action::Ability(slot) };
+        settings.pressed(&keys, a)
+    };
+    let casting = u.casting.map(|c| c.slot);
+    let mut down: Vec<usize> = Vec::new();
+    for (slot, interaction, mut border, mut tf) in &mut buttons {
+        let pressed = key_down(slot.0) || *interaction == Interaction::Pressed;
+        if pressed {
+            down.push(slot.0);
+        }
+        let idle = if slot.0 == TRINKET { GOLD } else { fx::color(u.spell(slot.0).school) };
+        let pulse = 0.5 + 0.5 * (now * 9.0).sin();
+        *border = BorderColor::all(if pressed {
+            Color::WHITE
+        } else if casting == Some(slot.0) {
+            GOLD.mix(&Color::WHITE, pulse)
+        } else if *interaction == Interaction::Hovered {
+            idle.lighter(0.25)
+        } else {
+            idle
+        });
+        let scale = Vec2::splat(if pressed { 0.88 } else { 1.0 });
+        if tf.scale != scale {
+            tf.scale = scale;
+        }
+    }
+    for (p, mut img) in &mut pics {
+        let key = if p.0 == TRINKET { icons::TRINKET } else { u.spell(p.0).key };
+        let h = icons.get(key);
+        if img.image != h {
+            img.image = h;
+        }
+        img.color = if down.contains(&p.0) { Color::srgb(0.6, 0.6, 0.6) } else { Color::WHITE };
+    }
+    for (fl, mut bg) in &mut flashes {
+        let age = last_fired.get(&fl.0).map_or(f32::MAX, |t| now - t);
+        let a = (1.0 - age / FLASH_SECS).clamp(0.0, 1.0) * 0.8;
+        bg.0 = Color::srgba(1.0, 0.92, 0.6, a);
     }
 }
 

@@ -223,6 +223,18 @@ impl Held {
         self.out() || self.silence_t > 0.0
     }
 
+    /// The seconds left on the timer this control runs on.
+    pub fn left_of(&self, ctl: Ctl) -> f32 {
+        match ctl {
+            Ctl::Slow(..) => self.slow_t,
+            Ctl::Root(_) => self.root_t,
+            Ctl::Stun(_) => self.stun_t,
+            Ctl::Fear(_) => self.fear_t,
+            Ctl::Incap(_) => self.incap_t,
+            Ctl::Silence(_) | Ctl::Interrupt(_) => self.silence_t,
+        }
+    }
+
     /// Rooted or stunned, for Shatter.
     pub fn frozen(&self) -> bool {
         self.root_t > 0.0 || self.stun_t > 0.0

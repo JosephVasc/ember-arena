@@ -21,6 +21,8 @@ pub struct Autopilot {
     t: f32,
     shot_t: f32,
     shots: u32,
+    /// The moment you first lost control has been captured.
+    caught_cc: bool,
 }
 
 fn env<T: std::str::FromStr>(key: &str) -> Option<T> {
@@ -41,6 +43,7 @@ pub fn plugin(app: &mut App) {
         t: 0.0,
         shot_t: 4.0,
         shots: 0,
+        caught_cc: false,
     })
     .add_systems(Update, drive);
 }
@@ -74,6 +77,12 @@ fn drive(
     if let Some((_, tf)) = fighters.iter().find(|(f, _)| f.player) {
         let fwd = tf.rotation * Vec3::Z;
         cam.yaw = fwd.x.atan2(fwd.z);
+    }
+    let controlled = fighters.iter().any(|(f, _)| f.player && f.unit.loss_of_control().is_some_and(|d| d.left < d.total - 0.2));
+    if controlled && !auto.caught_cc {
+        auto.caught_cc = true;
+        let path = auto.dir.join("controlled.png");
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
     }
     auto.shot_t -= dt;
     if auto.shot_t <= 0.0 {
