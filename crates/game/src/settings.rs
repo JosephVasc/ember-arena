@@ -25,6 +25,7 @@ pub enum Action {
     TargetParty1,
     TargetParty2,
     Trinket,
+    Attack,
     Ability(usize),
 }
 
@@ -41,6 +42,7 @@ impl Action {
             Action::TargetParty1,
             Action::TargetParty2,
             Action::Trinket,
+            Action::Attack,
         ];
         v.extend((0..10).map(Action::Ability));
         v
@@ -58,6 +60,7 @@ impl Action {
             Action::TargetParty1 => "Target party member 1".into(),
             Action::TargetParty2 => "Target party member 2".into(),
             Action::Trinket => "Trinket".into(),
+            Action::Attack => "Auto attack on / off".into(),
             Action::Ability(i) => format!("Action button {}", i + 1),
         }
     }
@@ -82,6 +85,7 @@ impl Action {
             Action::TargetParty1 => KeyCode::F2,
             Action::TargetParty2 => KeyCode::F3,
             Action::Trinket => KeyCode::KeyQ,
+            Action::Attack => KeyCode::KeyR,
             Action::Ability(i) => DIGITS[i],
         }
     }

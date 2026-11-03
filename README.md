@@ -23,6 +23,7 @@ Double-click `play.bat`, or `cargo run -p game`. Needs Rust (the pinned toolchai
 | Tab / click | Target an enemy / any fighter |
 | F1 - F3 | Target yourself / party |
 | 1 - 0 | Abilities (or click the bar) |
+| R / right-click an enemy | Auto attack on / off (melee abilities and shots start it too) |
 | Q | Trinket: break every control |
 | Esc | Clear target, then pause |
 

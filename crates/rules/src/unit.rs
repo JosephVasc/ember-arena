@@ -4,7 +4,7 @@
 
 use crate::Pt;
 use crate::control::{Ctl, Held, Landed};
-use crate::spells::{Aim, AuraDef, AuraKind, Class, GCD, Resource, School, Special, Spell, TRINKET_COOLDOWN};
+use crate::spells::{Aim, AuraDef, AuraKind, Class, GCD, Resource, School, Special, Spell, TRINKET_COOLDOWN, Use};
 
 /// An aura on a unit: a dot, hot, absorb or modifier, from an ability.
 #[derive(Clone, Copy, Debug)]
@@ -132,6 +132,10 @@ pub struct Unit {
     pub casting: Option<Casting>,
     pub immune_t: f32,
     pub trinket_cd: f32,
+    /// Swinging (or shooting) at the target by itself.
+    pub attacking: bool,
+    /// Seconds to the next white hit.
+    pub swing: f32,
     pub dead: bool,
     pub damage_done: f32,
     pub healing_done: f32,
@@ -154,6 +158,8 @@ impl Unit {
             casting: None,
             immune_t: 0.0,
             trinket_cd: 0.0,
+            attacking: false,
+            swing: 0.0,
             dead: false,
             damage_done: 0.0,
             healing_done: 0.0,
@@ -278,6 +284,48 @@ impl Unit {
         }
     }
 
+    /// Whether a white hit could reach its target now, whatever the swing timer says. A stun or a
+    /// fear stops it, a cast pauses it, and an auto shot needs standing still.
+    pub fn check_auto(&self, s: Situation) -> Result<(), Fail> {
+        let a = self.class.auto;
+        if self.dead {
+            return Err(Fail::Dead);
+        }
+        if self.cc.out() {
+            return Err(Fail::Held);
+        }
+        if self.casting.is_some() {
+            return Err(Fail::Busy);
+        }
+        if a.range > 6.0 && s.moving {
+            return Err(Fail::Moving);
+        }
+        let t = s.target.ok_or(Fail::NoTarget)?;
+        if !t.hostile || t.dead {
+            Err(Fail::WrongTarget)
+        } else if t.dist > a.range {
+            Err(Fail::OutOfRange)
+        } else if !t.sight {
+            Err(Fail::NoSight)
+        } else if !t.ahead {
+            Err(Fail::Facing)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Time for a white hit: attacking, the swing timer run down, and the target in reach.
+    pub fn can_swing(&self, s: Situation) -> bool {
+        self.attacking && self.swing <= 0.0 && self.check_auto(s).is_ok()
+    }
+
+    /// A white hit goes off: the timer restarts, and rage builds.
+    pub fn swung(&mut self) {
+        let a = self.class.auto;
+        self.swing = a.cooldown;
+        self.res = (self.res + a.gain).clamp(0.0, MAX_RES);
+    }
+
     /// Everything harmful on the unit now: controls first, strongest first, then the rest.
     pub fn debuffs(&self) -> Vec<Debuff> {
         if self.dead {
@@ -327,6 +375,7 @@ impl Unit {
         self.gcd = (self.gcd - dt).max(0.0);
         self.immune_t = (self.immune_t - dt).max(0.0);
         self.trinket_cd = (self.trinket_cd - dt).max(0.0);
+        self.swing = (self.swing - dt).max(0.0);
         self.cc.tick(dt);
         let regen = match self.class.resource {
             Resource::Mana => 1.2,
@@ -478,8 +527,9 @@ pub fn land(spell: &'static Spell, src: Source, target: &mut Unit) -> (Vec<Feedb
             Special::Execute(f) if target.hp_frac() <= f => d = d.max(target.hp / target.taken().max(0.01)),
             _ => {}
         }
+        // A white hit crits for double, an ability for half again.
         if src.crit {
-            d *= 1.5;
+            d *= if spell.ai == Use::Auto { 2.0 } else { 1.5 };
         }
         let fb = target.take(d, spell.school, src.crit);
         if let Special::Drain(f) = spell.special {
@@ -683,6 +733,49 @@ mod tests {
         assert!(u.trinket());
         let d = u.debuffs();
         assert_eq!((d.len(), d[0].key), (1, "venom_burst"));
+    }
+
+    #[test]
+    fn white_hits_swing_on_a_timer_build_rage_and_crit_for_double() {
+        let mut v = Unit::new(class("vanguard"));
+        let auto = v.class.auto;
+        assert!(!v.can_swing(at(3.0)), "not until attacking");
+        v.attacking = true;
+        assert!(v.can_swing(at(3.0)));
+        assert_eq!(v.check_auto(at(20.0)), Err(Fail::OutOfRange));
+        v.swung();
+        assert_eq!(v.res, auto.gain);
+        assert!(!v.can_swing(at(3.0)), "the timer runs first");
+        v.tick(auto.cooldown);
+        assert!(v.can_swing(at(3.0)));
+
+        let mut t = Unit::new(class("arcanist"));
+        let hp = t.hp;
+        land(auto, Source { crit: true, ..HIT }, &mut t);
+        assert_eq!(hp - t.hp, auto.damage * 2.0);
+    }
+
+    #[test]
+    fn a_stun_stops_a_white_hit_and_moving_stops_a_shot_not_a_blade() {
+        let mut v = Unit::new(class("vanguard"));
+        v.attacking = true;
+        let mut moving = at(3.0);
+        moving.moving = true;
+        assert!(v.can_swing(moving), "melee swings on the run");
+        v.cc.land(Ctl::Stun(2.0), 1.0, [0.0; 2]);
+        assert_eq!(v.check_auto(at(3.0)), Err(Fail::Held));
+        let mut r = Unit::new(class("ranger"));
+        r.attacking = true;
+        assert!(r.can_swing(at(30.0)));
+        assert_eq!(r.check_auto(Situation { moving: true, ..at(30.0) }), Err(Fail::Moving));
+    }
+
+    #[test]
+    fn a_caster_swings_only_up_close() {
+        let mut m = Unit::new(class("arcanist"));
+        m.attacking = true;
+        assert!(m.can_swing(at(3.0)));
+        assert_eq!(m.check_auto(at(20.0)), Err(Fail::OutOfRange));
     }
 
     #[test]

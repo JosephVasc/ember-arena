@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use rules::ai::{self, Brain, Seen};
 use rules::arena::ArenaDef;
 use rules::control::Ctl;
-use rules::spells::{self, Aim, Role, Special, Spell};
+use rules::spells::{self, Aim, Role, Special, Spell, Use};
 use rules::unit::{self, Feedback, Situation, Source, TargetInfo, Unit};
 
 use crate::art::{self, Anim, Clip, character};
@@ -26,7 +26,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, think.in_set(Step::Think).run_if(in_state(Phase::Fight)))
         .add_systems(
             Update,
-            (steer, gravity, advance, resolve, fly, arrive, deaths, verdict)
+            (steer, gravity, advance, swings, resolve, fly, arrive, deaths, verdict)
                 .chain()
                 .in_set(Step::Resolve)
                 .run_if(in_state(Phase::Fight).or(in_state(Phase::Gates))),
@@ -290,6 +290,8 @@ fn think(
             f.unit.trinket();
         }
         f.target = f.brain.target.map(|t| ents[t]);
+        // The computer's fighters keep swinging at whoever they're after.
+        f.unit.attacking = f.target.is_some();
         f.goal = plan.goal;
         if let Some((slot, on)) = plan.cast {
             let target = ents[on];
@@ -392,6 +394,63 @@ fn advance(
         }
         for fb in f.unit.tick(dt) {
             show(&mut fx, tf.translation, fb);
+        }
+    }
+}
+
+/// White hits: anyone attacking swings when the timer's up and the target's in reach, a blade at
+/// once, an auto shot as a bolt. They stop when the target's dead or gone.
+#[allow(clippy::too_many_arguments)]
+fn swings(
+    phase: Res<State<Phase>>,
+    sel: Res<Selection>,
+    mut rng: ResMut<Rng>,
+    mut fighters: Query<(Entity, &mut Fighter, &Transform, &mut Anim)>,
+    mut arrivals: MessageWriter<Arrive>,
+    mut fx: Fx,
+) {
+    if *phase.get() != Phase::Fight {
+        return;
+    }
+    let ids: Vec<Entity> = fighters.iter().map(|x| x.0).collect();
+    for me in ids {
+        let Ok((_, f, tf, _)) = fighters.get(me) else { continue };
+        let spell = f.unit.class.auto;
+        if !f.unit.attacking {
+            continue;
+        }
+        let target = f.target;
+        let info = target.and_then(|t| fighters.get(t).ok()).map(|(_, o, otf, _)| (o, otf));
+        let gone = info.is_none_or(|(o, _)| o.unit.dead || o.team == f.team);
+        let moving = f.stride != Stride::Still || f.air > 0.0;
+        // The computer's fighters turn to their target as they swing.
+        let s = situation(sel.arena(), (f, tf), info, moving, !f.player);
+        let ready = f.unit.can_swing(s);
+        let from = tf.translation;
+        let team_src = Source {
+            dealt: f.unit.dealt(),
+            crit: rng.f32() < CRIT,
+            from: pt(from),
+            hostile: true,
+        };
+        let gear = f.unit.class.gear;
+        let Ok((_, mut f, _, mut anim)) = fighters.get_mut(me) else { continue };
+        if gone {
+            f.unit.attacking = false;
+            continue;
+        }
+        let Some(target) = target.filter(|_| ready) else { continue };
+        f.unit.swung();
+        anim.play(Clip::attack(gear), 0.5);
+        let arrive = Arrive { caster: me, target, spell, src: team_src };
+        if spell.range > 6.0 {
+            fx.glow_sphere(
+                Bolt { arrive },
+                spell.school,
+                Transform::from_translation(from + Vec3::Y * 1.2).with_scale(Vec3::splat(0.12)),
+            );
+        } else {
+            arrivals.write(arrive);
         }
     }
 }
@@ -615,7 +674,7 @@ fn arrive(
             }
             (fb, ttf.translation)
         };
-        fx.flash(pos, a.spell.school, 1.3);
+        fx.flash(pos, a.spell.school, if a.spell.ai == Use::Auto { 0.6 } else { 1.3 });
         for b in fb {
             show(&mut fx, pos, b);
         }

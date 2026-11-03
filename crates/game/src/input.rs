@@ -9,6 +9,7 @@
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use rules::spells::Aim;
 use rules::unit::Fail;
 
 use crate::camera::{Cam, MainCam, PITCH_MAX, PITCH_MIN};
@@ -37,6 +38,9 @@ pub struct Errors(pub Option<(String, f32)>);
 /// How far the mouse travelled while a button was held, to tell a click from a drag.
 #[derive(Resource, Default)]
 struct Drag(f32);
+
+/// The auto attack's slot on the bar; the trinket's is `usize::MAX`.
+pub const AUTO_SLOT: usize = usize::MAX - 1;
 
 /// An action bar slot clicked with the mouse (`usize::MAX` for the trinket).
 #[derive(Message, Clone, Copy)]
@@ -152,6 +156,7 @@ fn targeting(
         return;
     };
     let mut pick: Option<Option<Entity>> = None;
+    let mut attack = false;
     if settings.just(&keys, Action::NextTarget) {
         // The nearest living enemy in front, cycling past the current target.
         let current = fighters.get(me).ok().and_then(|(_, f, _)| f.target);
@@ -185,9 +190,11 @@ fn targeting(
     if keys.just_pressed(KeyCode::Escape) {
         pick = Some(None);
     }
-    // A click (not a drag, not on the HUD) on a fighter targets it.
+    // A click (not a drag, not on the HUD) on a fighter targets it; a right click on an enemy
+    // attacks it too.
     let on_ui = ui.iter().any(|i| *i != Interaction::None);
-    if mouse.just_released(MouseButton::Left) && drag.0 < 6.0 && !on_ui {
+    let right = mouse.just_released(MouseButton::Right);
+    if (mouse.just_released(MouseButton::Left) || right) && drag.0 < 6.0 && !on_ui {
         if let (Some(cursor), Ok((cam, cam_tf))) =
             (windows.single().ok().and_then(|w| w.cursor_position()), cams.single())
         {
@@ -201,12 +208,19 @@ fn targeting(
                 .min_by(|a, b| a.0.total_cmp(&b.0));
             if let Some((_, e)) = hit {
                 pick = Some(Some(e));
+                attack = right && fighters.get(e).is_ok_and(|(_, f, _)| f.team != my_team);
             }
         }
     }
     if let Some(t) = pick {
         if let Ok((_, mut f, _)) = fighters.get_mut(me) {
             f.target = t;
+            if t.is_none() {
+                f.unit.attacking = false;
+            }
+            if attack {
+                f.unit.attacking = true;
+            }
         }
     }
 }
@@ -235,6 +249,9 @@ fn cast_keys(
     if settings.just(&keys, Action::Trinket) {
         want.push(usize::MAX);
     }
+    if settings.just(&keys, Action::Attack) {
+        want.push(AUTO_SLOT);
+    }
     if want.is_empty() {
         return;
     }
@@ -242,6 +259,16 @@ fn cast_keys(
     let fail = |errors: &mut Errors, text: &str| errors.0 = Some((text.to_string(), 2.0));
     for slot in want {
         let Ok((_, f, tf)) = fighters.get(me) else { return };
+        if slot == AUTO_SLOT {
+            let starting = !f.unit.attacking;
+            let target_ok = f.target.and_then(|t| fighters.get(t).ok()).is_some_and(|(_, o, _)| o.team != f.team && !o.unit.dead);
+            if starting && !target_ok {
+                fail(&mut errors, Fail::NoTarget.text());
+            } else if let Ok((_, mut f, _)) = fighters.get_mut(me) {
+                f.unit.attacking = starting;
+            }
+            continue;
+        }
         if slot == usize::MAX {
             let pos = tf.translation;
             if let Ok((_, mut f, _)) = fighters.get_mut(me) {
@@ -265,6 +292,12 @@ fn cast_keys(
         match f.unit.check(slot, s) {
             Ok(()) => {
                 if let Ok((_, mut f, _)) = fighters.get_mut(me) {
+                    // A melee ability starts the swings and a shot the auto shot; a spell starts
+                    // nothing, so a caster won't break their own controls by standing close.
+                    let spell = f.unit.spell(slot);
+                    if spell.aim == Aim::Enemy && (spell.range <= 6.0 || f.unit.class.auto.range > 6.0) {
+                        f.unit.attacking = true;
+                    }
                     start(&mut f, me, slot, target, &mut out);
                 }
             }

@@ -45,6 +45,7 @@ fn build(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         for s in c.spells {
             add(s.key, tint(s.school, c.color), &mut images);
         }
+        add(c.auto.key, tint(c.auto.school, c.color), &mut images);
     }
     add(TRINKET, School::Holy.color(), &mut images);
     commands.insert_resource(icons);
@@ -109,6 +110,12 @@ fn look(key: &str) -> Option<(Glyph, f32)> {
     use Glyph::*;
     const Q: f32 = std::f32::consts::FRAC_PI_4;
     Some(match key {
+        // White hits.
+        "white_sword" => (CrossedSwords, 0.0),
+        "white_axe" => (Axe, 0.45),
+        "white_knives" => (Daggers, 0.0),
+        "auto_shot" => (Arrow, Q),
+        "white_staff" | "white_wand" => (Hammer, Q),
         // Vanguard.
         "steel_strike" => (Sword, Q),
         "rending_strike" => (Slash, 0.0),
@@ -529,6 +536,9 @@ mod tests {
             }
         }
         assert!(look(TRINKET).is_some());
+        for c in CLASSES {
+            assert!(look(c.auto.key).is_some(), "{} has no icon", c.auto.key);
+        }
     }
 
     #[test]

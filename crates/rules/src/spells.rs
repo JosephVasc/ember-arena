@@ -136,6 +136,8 @@ pub enum Use {
     /// Get away.
     Escape,
     Cleanse,
+    /// The white hit: not on the bar, it swings by itself while attacking.
+    Auto,
 }
 
 pub struct Spell {
@@ -233,6 +235,9 @@ pub struct Class {
     pub health: f32,
     /// 0xRRGGBB.
     pub color: u32,
+    /// The white hit or auto shot: `cooldown` is its swing time, `gain` the rage each swing builds.
+    /// A caster's is a feeble swing of the staff.
+    pub auto: &'static Spell,
     pub spells: &'static [Spell],
 }
 
@@ -247,6 +252,7 @@ pub static CLASSES: &[Class] = &[
         resource: Resource::Rage,
         health: 620.0,
         color: 0xC9A35C,
+        auto: &spell!("white_sword", "Attack", Physical, Enemy, Auto { range: MELEE, damage: 16.0, cooldown: 2.4, gain: 10.0, gcd: false }),
         spells: &[
             spell!("steel_strike", "Steel Strike", Physical, Enemy, Filler { range: MELEE, damage: 20.0, gain: 15.0 }),
             spell!("rending_strike", "Rending Strike", Physical, Enemy, Damage { range: MELEE, damage: 46.0, cost: 30.0, cooldown: 6.0 }),
@@ -270,6 +276,7 @@ pub static CLASSES: &[Class] = &[
         resource: Resource::Rage,
         health: 600.0,
         color: 0xB5482D,
+        auto: &spell!("white_axe", "Attack", Physical, Enemy, Auto { range: MELEE, damage: 24.0, cooldown: 3.2, gain: 14.0, gcd: false }),
         spells: &[
             spell!("wide_chop", "Wide Chop", Physical, Enemy, Filler { range: MELEE, damage: 22.0, gain: 15.0 }),
             spell!("gorge", "Gorge", Physical, Enemy, Damage { range: MELEE, damage: 42.0, cost: 25.0, cooldown: 6.0, special: Special::Drain(0.3) }),
@@ -293,6 +300,7 @@ pub static CLASSES: &[Class] = &[
         resource: Resource::Mana,
         health: 480.0,
         color: 0x5FB9F2,
+        auto: &spell!("white_staff", "Attack", Physical, Enemy, Auto { range: MELEE, damage: 6.0, cooldown: 2.8, gcd: false }),
         spells: &[
             spell!("frost_lance", "Frost Lance", Frost, Enemy, Filler { cast: 2.0, damage: 38.0, cost: 4.0, ctl: Some(Ctl::Slow(0.6, 6.0)) }),
             spell!("flame_burst", "Flame Burst", Fire, Enemy, Damage { range: 20.0, damage: 24.0, cost: 6.0, cooldown: 8.0 }),
@@ -316,6 +324,7 @@ pub static CLASSES: &[Class] = &[
         resource: Resource::Energy,
         health: 520.0,
         color: 0xE8D45C,
+        auto: &spell!("white_knives", "Attack", Physical, Enemy, Auto { range: MELEE, damage: 9.0, cooldown: 1.3, gcd: false }),
         spells: &[
             spell!("twin_slash", "Twin Slash", Physical, Enemy, Filler { range: MELEE, damage: 22.0, cost: 40.0 }),
             spell!("finishing_cut", "Finishing Cut", Physical, Enemy, Damage { range: MELEE, damage: 52.0, cost: 35.0, cooldown: 8.0 }),
@@ -339,6 +348,7 @@ pub static CLASSES: &[Class] = &[
         resource: Resource::Mana,
         health: 520.0,
         color: 0x7DBE58,
+        auto: &spell!("auto_shot", "Auto Shot", Physical, Enemy, Auto { range: 35.0, damage: 12.0, cooldown: 2.0, gcd: false }),
         spells: &[
             spell!("quick_bolt", "Quick Bolt", Physical, Enemy, Filler { range: 35.0, damage: 22.0, cost: 3.0 }),
             spell!("piercing_shot", "Piercing Shot", Physical, Enemy, Damage { range: 35.0, cast: 2.5, damage: 64.0, cost: 8.0, cooldown: 8.0 }),
@@ -362,6 +372,7 @@ pub static CLASSES: &[Class] = &[
         resource: Resource::Mana,
         health: 500.0,
         color: 0xF2F2E6,
+        auto: &spell!("white_wand", "Attack", Physical, Enemy, Auto { range: MELEE, damage: 5.0, cooldown: 2.6, gcd: false }),
         spells: &[
             spell!("mending_light", "Mending Light", Holy, Friend, Heal { range: 40.0, cast: 2.0, heal: 60.0, cost: 6.0 }),
             spell!("swift_mend", "Swift Mend", Holy, Friend, Heal { range: 40.0, heal: 32.0, cost: 8.0, cooldown: 8.0 }),
@@ -413,6 +424,21 @@ mod tests {
             assert!(c.spells[0].ai == first, "{} slot 1 should be its bread and butter", c.name);
         }
         assert!(CLASSES.iter().any(|c| c.role == Role::Healer));
+    }
+
+    #[test]
+    fn everyone_has_a_white_hit_and_a_casters_is_feeble() {
+        let dps = |c: &Class| c.auto.damage / c.auto.cooldown;
+        let is_caster = |c: &Class| c.resource == Resource::Mana && c.key != "ranger";
+        let weakest_fighter = CLASSES.iter().filter(|c| !is_caster(c)).map(dps).fold(f32::MAX, f32::min);
+        for c in CLASSES {
+            let filler = c.spells.iter().find(|s| s.ai == Use::Filler).expect("a filler");
+            assert!(dps(c) < filler.damage / GCD, "{} white hits outdo its filler", c.name);
+            assert_eq!(c.auto.gain > 0.0, c.resource == Resource::Rage, "{}", c.name);
+            if is_caster(c) {
+                assert!(dps(c) < weakest_fighter * 0.5, "{} swings too hard", c.name);
+            }
+        }
     }
 
     #[test]

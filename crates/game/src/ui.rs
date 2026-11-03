@@ -10,7 +10,7 @@ use crate::camera::MainCam;
 use crate::fight::{Fighter, Match, Release, situation};
 use crate::icons::{self, Icons};
 use crate::fx;
-use crate::input::{Errors, Press};
+use crate::input::{AUTO_SLOT, Errors, Press};
 use crate::settings::{Action, OpenSettings, Settings, short};
 use crate::{MatchEntity, Phase, Selection, Step};
 
@@ -301,6 +301,7 @@ fn build_screens(mut commands: Commands) {
                     for i in 0..10 {
                         slot(row, i);
                     }
+                    slot(row, AUTO_SLOT);
                     slot(row, TRINKET);
                 });
             });
@@ -510,7 +511,7 @@ fn refresh_menu(
     }
     let c = sel.class();
     if let Ok(mut t) = info.single_mut() {
-        **t = format!("{} - {} - {} health\n{}", c.name, c.resource.name(), c.health, c.blurb);
+        **t = format!("{} - {} - {} health\n{}\n{}", c.name, c.resource.name(), c.health, c.blurb, auto_text(c.auto));
     }
     for (r, mut t) in &mut rows {
         t.0 = format!("{}. {}", (r.0 + 1) % 10, describe(&c.spells[r.0]));
@@ -629,8 +630,7 @@ fn action_bar(
     mut tip: Query<&mut Text, (With<SlotTip>, Without<SlotKey>)>,
 ) {
     for (k, mut t) in &mut keys {
-        let a = if k.0 == TRINKET { Action::Trinket } else { Action::Ability(k.0) };
-        let s = short(settings.key(a));
+        let s = short(settings.key(slot_action(k.0)));
         if t.0 != s {
             t.0 = s;
         }
@@ -642,6 +642,8 @@ fn action_bar(
     for (shade, mut n) in &mut shades {
         let frac = if shade.0 == TRINKET {
             u.trinket_cd / rules::spells::TRINKET_COOLDOWN
+        } else if shade.0 == AUTO_SLOT {
+            u.swing / u.class.auto.cooldown
         } else {
             let sp = u.spell(shade.0);
             let cd = if sp.cooldown > 0.0 { u.cds[shade.0] / sp.cooldown } else { 0.0 };
@@ -651,21 +653,44 @@ fn action_bar(
         n.height = Val::Percent((frac * 100.0).clamp(0.0, 100.0));
     }
     for (veil, mut bg) in &mut veils {
-        let bad = veil.0 != TRINKET
-            && matches!(
-                u.check(veil.0, s),
-                Err(Fail::NoResource | Fail::OutOfRange | Fail::NoSight | Fail::WrongTarget | Fail::NoTarget | Fail::Held | Fail::Silenced)
-            );
+        let check = match veil.0 {
+            TRINKET => Ok(()),
+            AUTO_SLOT => u.check_auto(s),
+            i => u.check(i, s),
+        };
+        let bad = matches!(
+            check,
+            Err(Fail::NoResource | Fail::OutOfRange | Fail::NoSight | Fail::WrongTarget | Fail::NoTarget | Fail::Held | Fail::Silenced)
+        );
         bg.0 = if bad { Color::srgba(0.6, 0.05, 0.05, 0.45) } else { Color::NONE };
     }
     let hover = hovered.iter().find(|(_, i)| **i != Interaction::None).map(|(s, _)| s.0);
     if let Ok(mut t) = tip.single_mut() {
         t.0 = match hover {
             Some(TRINKET) => "Trinket (Q): breaks every stun, fear, root, silence and slow. 2 minute cooldown.".into(),
+            Some(AUTO_SLOT) => auto_text(u.class.auto),
             Some(i) => describe(u.spell(i)),
             None => String::new(),
         };
     }
+}
+
+/// The binding behind a bar slot.
+fn slot_action(slot: usize) -> Action {
+    match slot {
+        TRINKET => Action::Trinket,
+        AUTO_SLOT => Action::Attack,
+        i => Action::Ability(i),
+    }
+}
+
+/// What a white hit does, in a tooltip's voice.
+fn auto_text(a: &Spell) -> String {
+    let rage = if a.gain > 0.0 { format!(", builds {} rage", a.gain) } else { String::new() };
+    format!(
+        "{}: {} damage every {}s{rage}, can crit for double. Toggle it, or right-click an enemy; melee abilities and shots start it too.",
+        a.name, a.damage, a.cooldown
+    )
 }
 
 /// How long a slot's flash lasts when its ability goes off.
@@ -683,6 +708,7 @@ fn slot_feedback(
     mut fired: MessageReader<Release>,
     mut last_fired: Local<std::collections::HashMap<usize, f32>>,
     mut last_trinket: Local<f32>,
+    mut last_swing: Local<f32>,
     mut buttons: Query<(&Slot, &Interaction, &mut BorderColor, &mut UiTransform), With<Button>>,
     mut pics: Query<(&SlotIcon, &mut ImageNode)>,
     mut flashes: Query<(&SlotFlash, &mut BackgroundColor)>,
@@ -699,10 +725,11 @@ fn slot_feedback(
         last_fired.insert(TRINKET, now);
     }
     *last_trinket = u.trinket_cd;
-    let key_down = |slot: usize| {
-        let a = if slot == TRINKET { Action::Trinket } else { Action::Ability(slot) };
-        settings.pressed(&keys, a)
-    };
+    if u.swing > *last_swing {
+        last_fired.insert(AUTO_SLOT, now);
+    }
+    *last_swing = u.swing;
+    let key_down = |slot: usize| settings.pressed(&keys, slot_action(slot));
     let casting = u.casting.map(|c| c.slot);
     let mut down: Vec<usize> = Vec::new();
     for (slot, interaction, mut border, mut tf) in &mut buttons {
@@ -710,7 +737,12 @@ fn slot_feedback(
         if pressed {
             down.push(slot.0);
         }
-        let idle = if slot.0 == TRINKET { GOLD } else { fx::color(u.spell(slot.0).school) };
+        let idle = match slot.0 {
+            TRINKET => GOLD,
+            AUTO_SLOT if u.attacking => Color::srgb(1.0, 0.25, 0.15),
+            AUTO_SLOT => EDGE,
+            i => fx::color(u.spell(i).school),
+        };
         let pulse = 0.5 + 0.5 * (now * 9.0).sin();
         *border = BorderColor::all(if pressed {
             Color::WHITE
@@ -727,7 +759,11 @@ fn slot_feedback(
         }
     }
     for (p, mut img) in &mut pics {
-        let key = if p.0 == TRINKET { icons::TRINKET } else { u.spell(p.0).key };
+        let key = match p.0 {
+            TRINKET => icons::TRINKET,
+            AUTO_SLOT => u.class.auto.key,
+            i => u.spell(i).key,
+        };
         let h = icons.get(key);
         if img.image != h {
             img.image = h;
