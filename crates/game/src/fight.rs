@@ -24,6 +24,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(OnEnter(Phase::Menu), clear)
         .add_systems(Update, gates.run_if(in_state(Phase::Gates)))
         .add_systems(Update, think.in_set(Step::Think).run_if(in_state(Phase::Fight)))
+        .add_systems(Update, prep_buffs.in_set(Step::Think).run_if(in_state(Phase::Gates)))
         .add_systems(
             Update,
             (steer, gravity, advance, swings, resolve, fly, arrive, deaths, verdict)
@@ -39,9 +40,10 @@ pub const SPEED: f32 = 7.0;
 /// The models at this scale: a touch smaller than life against the arena.
 pub const SCALE: f32 = 0.8;
 pub const BODY: f32 = 0.6;
-const GATES_SECS: f32 = 5.0;
+/// The time to buff up behind the gates; Enter cuts it short to [`READY_SECS`].
+const GATES_SECS: f32 = 30.0;
+pub const READY_SECS: f32 = 3.0;
 const BOLT_SPEED: f32 = 40.0;
-const CRIT: f32 = 0.1;
 
 /// How a fighter is moving this frame, for its animation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -82,6 +84,10 @@ impl Fighter {
 
 #[derive(Resource, Default)]
 pub struct Match {
+    /// The fighters are in the arena.
+    pub spawned: bool,
+    /// The gates have opened.
+    pub opened: bool,
     pub gates_t: f32,
     pub elapsed: f32,
     /// `Some(true)` when your team won.
@@ -143,7 +149,11 @@ fn spawn_match(
     mut state: ResMut<Match>,
     mut cam: ResMut<crate::camera::Cam>,
 ) {
-    *state = Match { gates_t: GATES_SECS, ..default() };
+    // Back from a pause they're already here.
+    if state.spawned {
+        return;
+    }
+    *state = Match { spawned: true, gates_t: GATES_SECS, ..default() };
     let n = sel.bracket.clamp(1, 3);
     let me = sel.class();
     let mut ours = vec![me];
@@ -195,16 +205,47 @@ fn spawn_match(
     }
 }
 
-fn clear(mut commands: Commands, spawned: Query<Entity, With<MatchEntity>>) {
+fn clear(mut commands: Commands, mut state: ResMut<Match>, spawned: Query<Entity, With<MatchEntity>>) {
+    *state = Match::default();
     for e in &spawned {
         commands.entity(e).despawn();
     }
 }
 
-fn gates(time: Res<Time>, mut state: ResMut<Match>, mut next: ResMut<NextState<Phase>>) {
+/// The countdown; when it ends everyone is made whole and the gates open.
+fn gates(time: Res<Time>, mut state: ResMut<Match>, mut fighters: Query<&mut Fighter>, mut next: ResMut<NextState<Phase>>) {
     state.gates_t -= time.delta_secs();
     if state.gates_t <= 0.0 {
+        state.opened = true;
+        state.elapsed = 0.0;
+        for mut f in &mut fighters {
+            f.unit.prepare();
+        }
         next.set(Phase::Fight);
+    }
+}
+
+/// Behind the gates the computer's fighters buff up: their own buffs, and the team's on anyone
+/// missing them.
+fn prep_buffs(auto: Option<Res<crate::auto::Autopilot>>, mut fighters: Query<(Entity, &mut Fighter)>, mut out: MessageWriter<Release>) {
+    let worn: Vec<(usize, Vec<&'static str>)> =
+        fighters.iter().map(|(_, f)| (f.team, f.unit.auras.iter().map(|a| a.name).collect())).collect();
+    for (me, mut f) in &mut fighters {
+        if (f.player && auto.is_none()) || f.unit.gcd > 0.0 {
+            continue;
+        }
+        let first = f.unit.class.spells.len();
+        for (k, b) in f.unit.class.buffs.iter().enumerate() {
+            let needed = if b.aim == Aim::Party {
+                worn.iter().any(|(team, names)| *team == f.team && !names.contains(&b.name))
+            } else {
+                !f.unit.auras.iter().any(|a| a.name == b.name)
+            };
+            if needed {
+                start(&mut f, me, first + k, Some(me), &mut out);
+                break;
+            }
+        }
     }
 }
 
@@ -429,7 +470,7 @@ fn swings(
         let from = tf.translation;
         let team_src = Source {
             dealt: f.unit.dealt(),
-            crit: rng.f32() < CRIT,
+            crit: rng.f32() < f.unit.crit_chance(),
             from: pt(from),
             hostile: true,
         };
@@ -494,7 +535,7 @@ fn resolve(
         let spell = f.unit.spell(r.slot);
         let src = Source {
             dealt: f.unit.dealt(),
-            crit: rng.f32() < CRIT,
+            crit: rng.f32() < f.unit.crit_chance(),
             from: pt(tf.translation),
             hostile: true,
         };
@@ -531,6 +572,7 @@ fn resolve(
         let mut targets: Vec<Entity> = Vec::new();
         match spell.aim {
             Aim::Around => fx.nova(me, spell.school, spell.radius),
+            Aim::Party => fx.nova(me, spell.school, 4.0),
             Aim::Friend => {
                 let friendly = r.target.and_then(|t| fighters.get(t).ok()).is_some_and(|(o, _, _)| o.team == team && !o.unit.dead);
                 targets.push(if friendly { r.target.unwrap_or(r.caster) } else { r.caster });
@@ -543,6 +585,17 @@ fn resolve(
         }
         if spell.aim == Aim::Around {
             around(&mut fighters, spell, src, team, me, arena, &mut fx);
+        }
+        if spell.aim == Aim::Party {
+            for (mut o, otf, _) in fighters.iter_mut() {
+                if o.team == team && !o.unit.dead {
+                    let (fb, _) = unit::land(spell, Source { hostile: false, ..src }, &mut o.unit);
+                    fx.flash(otf.translation, spell.school, 1.5);
+                    for b in fb {
+                        show(&mut fx, otf.translation, b);
+                    }
+                }
+            }
         }
     }
 }

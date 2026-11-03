@@ -9,11 +9,11 @@
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use rules::spells::Aim;
+use rules::spells::{Aim, Use};
 use rules::unit::Fail;
 
 use crate::camera::{Cam, MainCam, PITCH_MAX, PITCH_MIN};
-use crate::fight::{BODY, Fighter, Release, SPEED, Stride, situation, start};
+use crate::fight::{BODY, Fighter, Match, READY_SECS, Release, SPEED, Stride, situation, start};
 use crate::art::{Anim, Clip};
 use crate::fx::{self, Fx};
 use crate::settings::{Action, Overlay, Settings};
@@ -80,6 +80,7 @@ fn move_player(
     mouse: Res<ButtonInput<MouseButton>>,
     sel: Res<Selection>,
     settings: Res<Settings>,
+    state: Res<Match>,
     mut fighters: Query<(&mut Fighter, &mut Transform, &mut Anim)>,
 ) {
     let dt = time.delta_secs();
@@ -124,7 +125,12 @@ fn move_player(
     let back = dir.dot(fwd) < -0.1;
     let pace = if back { 0.6 } else if cc.fear_t > 0.0 { 0.7 } else { 1.0 };
     let step = dir.normalize() * SPEED * cc.speed() * pace * dt;
-    tf.translation = at(sel.arena().confine(pt(tf.translation + step), BODY));
+    let mut next = sel.arena().confine(pt(tf.translation + step), BODY);
+    // Behind the gates you stay in your pen.
+    if !state.opened {
+        next = sel.arena().confine_pen(next, f.team, BODY);
+    }
+    tf.translation = at(next);
     let side = dir.dot(right);
     f.stride = if back {
         Stride::Back
@@ -246,6 +252,7 @@ fn cast_keys(
     }
     let mut want: Vec<usize> = presses.read().map(|p| p.0).collect();
     want.extend((0..10).filter(|&i| settings.just(&keys, Action::Ability(i))));
+    want.extend((0..2).filter(|&i| settings.just(&keys, Action::Buff(i))).map(|i| 10 + i));
     if settings.just(&keys, Action::Trinket) {
         want.push(usize::MAX);
     }
@@ -281,7 +288,7 @@ fn cast_keys(
             }
             continue;
         }
-        if *phase.get() == Phase::Gates {
+        if *phase.get() == Phase::Gates && f.unit.spell(slot).ai != Use::Buff {
             fail(&mut errors, "The gates have not opened yet");
             continue;
         }
@@ -310,6 +317,7 @@ fn pause_keys(
     keys: Res<ButtonInput<KeyCode>>,
     phase: Res<State<Phase>>,
     fighters: Query<&Fighter>,
+    mut state: ResMut<Match>,
     mut overlay: ResMut<Overlay>,
     mut next: ResMut<NextState<Phase>>,
 ) {
@@ -327,7 +335,11 @@ fn pause_keys(
                 next.set(Phase::Paused);
             }
         }
-        Phase::Paused if keys.just_pressed(KeyCode::Escape) => next.set(Phase::Fight),
+        Phase::Paused if keys.just_pressed(KeyCode::Escape) => {
+            next.set(if state.opened { Phase::Fight } else { Phase::Gates });
+        }
+        // Ready: cut the wait at the gates short.
+        Phase::Gates if keys.just_pressed(KeyCode::Enter) => state.gates_t = state.gates_t.min(READY_SECS),
         Phase::Paused if keys.just_pressed(KeyCode::KeyM) => next.set(Phase::Menu),
         Phase::Results if keys.just_pressed(KeyCode::Enter) => next.set(Phase::Menu),
         _ => {}

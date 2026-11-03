@@ -236,10 +236,10 @@ fn build_screens(mut commands: Commands) {
             root.spawn(panel(Node { flex_direction: FlexDirection::Column, padding: UiRect::all(Val::Px(14.0)), width: Val::Px(520.0), align_self: AlignSelf::FlexStart, ..default() }))
                 .with_children(|col| {
                     col.spawn((ClassInfo, label("", 15.0, Color::WHITE)));
-                    for i in 0..10 {
-                        col.spawn(Node { column_gap: Val::Px(8.0), margin: UiRect::top(Val::Px(5.0)), align_items: AlignItems::Center, ..default() })
+                    for i in 0..12 {
+                        col.spawn(Node { column_gap: Val::Px(8.0), margin: UiRect::top(Val::Px(4.0)), align_items: AlignItems::Center, ..default() })
                             .with_children(|r| {
-                                r.spawn((SpellRowIcon(i), Node { width: Val::Px(38.0), height: Val::Px(38.0), flex_shrink: 0.0, ..default() }, ImageNode::default()));
+                                r.spawn((SpellRowIcon(i), Node { width: Val::Px(34.0), height: Val::Px(34.0), flex_shrink: 0.0, ..default() }, ImageNode::default()));
                                 r.spawn((SpellRow(i), label("", 13.0, Color::WHITE)));
                             });
                     }
@@ -282,7 +282,7 @@ fn build_screens(mut commands: Commands) {
             ));
             root.spawn((
                 Node { position_type: PositionType::Absolute, top: Val::Percent(30.0), width: Val::Percent(100.0), justify_content: JustifyContent::Center, ..default() },
-                children![(label("", 40.0, GOLD), CenterText)],
+                children![(label("", 34.0, GOLD), CenterText, TextLayout::new_with_justify(Justify::Center))],
             ));
             // Your cast bar and the action bar, bottom centre.
             root.spawn(Node {
@@ -303,6 +303,8 @@ fn build_screens(mut commands: Commands) {
                     }
                     slot(row, AUTO_SLOT);
                     slot(row, TRINKET);
+                    slot(row, 10);
+                    slot(row, 11);
                 });
             });
         });
@@ -369,6 +371,7 @@ pub fn describe(s: &Spell) -> String {
     let range = match s.aim {
         Aim::Myself => "self".to_string(),
         Aim::Around => format!("{} yd around you", s.radius),
+        Aim::Party => "your whole team".to_string(),
         _ if s.range <= 6.0 => "melee".into(),
         _ => format!("{} yd", s.range),
     };
@@ -399,8 +402,13 @@ pub fn describe(s: &Spell) -> String {
             AuraKind::Dot(d) => format!("{d} damage a second for {}s", a.secs),
             AuraKind::Hot(h) => format!("heals {h} a second for {}s", a.secs),
             AuraKind::Absorb(p) => format!("absorbs {p} damage for {}s", a.secs),
+            AuraKind::Taken(m) if a.secs > 600.0 => format!("cuts damage taken by {}%", ((1.0 - m) * 100.0).round()),
             AuraKind::Taken(m) => format!("cuts damage taken by {}% for {}s", ((1.0 - m) * 100.0).round(), a.secs),
+            AuraKind::Dealt(m) if a.secs > 600.0 => format!("raises damage by {}%", ((m - 1.0) * 100.0).round()),
             AuraKind::Dealt(m) => format!("raises damage by {}% for {}s", ((m - 1.0) * 100.0).round(), a.secs),
+            AuraKind::Health(m) => format!("raises maximum health by {}%", ((m - 1.0) * 100.0).round()),
+            AuraKind::Crit(c) => format!("raises critical strike chance by {}%", (c * 100.0).round()),
+            AuraKind::Regen(r) => format!("restores {r} more mana a second"),
         });
     }
     if let Some(c) = s.ctl {
@@ -513,11 +521,14 @@ fn refresh_menu(
     if let Ok(mut t) = info.single_mut() {
         **t = format!("{} - {} - {} health\n{}\n{}", c.name, c.resource.name(), c.health, c.blurb, auto_text(c.auto));
     }
+    // The ten abilities, then the two buffs.
+    let spell = |i: usize| if i < 10 { &c.spells[i] } else { &c.buffs[i - 10] };
     for (r, mut t) in &mut rows {
-        t.0 = format!("{}. {}", (r.0 + 1) % 10, describe(&c.spells[r.0]));
+        let tag = if r.0 < 10 { format!("{}", (r.0 + 1) % 10) } else { "Buff".to_string() };
+        t.0 = format!("{tag}. {}", describe(spell(r.0)));
     }
     for (r, mut img) in &mut pics {
-        img.image = icons.get(c.spells[r.0].key);
+        img.image = icons.get(spell(r.0).key);
     }
 }
 
@@ -680,6 +691,7 @@ fn slot_action(slot: usize) -> Action {
     match slot {
         TRINKET => Action::Trinket,
         AUTO_SLOT => Action::Attack,
+        i if i >= 10 => Action::Buff(i - 10),
         i => Action::Ability(i),
     }
 }
@@ -789,6 +801,7 @@ fn banners(
     phase: Res<State<Phase>>,
     state: Res<Match>,
     errors: Res<Errors>,
+    settings: Res<Settings>,
     mut err: Query<&mut Text, (With<ErrorText>, Without<CenterText>)>,
     mut center: Query<&mut Text, (With<CenterText>, Without<ErrorText>)>,
 ) {
@@ -797,7 +810,10 @@ fn banners(
     }
     if let Ok(mut t) = center.single_mut() {
         t.0 = match phase.get() {
-            Phase::Gates => format!("The gates open in {}", state.gates_t.ceil().max(1.0)),
+            Phase::Gates => {
+                let k = |i| settings.key(Action::Buff(i)).map_or("-".to_string(), crate::settings::label);
+                format!("The gates open in {}\nBuff up: {}, {}   Enter: ready", state.gates_t.ceil().max(1.0), k(0), k(1))
+            }
             Phase::Fight if state.elapsed < 1.5 => "Fight!".into(),
             _ => String::new(),
         };

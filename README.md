@@ -25,6 +25,8 @@ Double-click `play.bat`, or `cargo run -p game`. Needs Rust (the pinned toolchai
 | 1 - 0 | Abilities (or click the bar) |
 | R / right-click an enemy | Auto attack on / off (melee abilities and shots start it too) |
 | Q | Trinket: break every control |
+| V / B | Your class's two long buffs (cast them behind the gates) |
+| Enter | At the gates: ready, cut the wait short |
 | Esc | Clear target, then pause |
 
 Every key can be rebound: **Keybinds & settings** on the menu or the pause screen (Esc).

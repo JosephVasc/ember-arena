@@ -38,12 +38,13 @@ struct OtherRow(usize);
 struct OtherIcon(usize);
 #[derive(Component)]
 struct OtherText(usize);
+/// An aura icon: whether it's in the buff row (else the debuff row), and its place there.
 #[derive(Component)]
-struct DebuffSlot(usize);
+struct DebuffSlot(bool, usize);
 #[derive(Component)]
-struct DebuffIcon(usize);
+struct DebuffIcon(bool, usize);
 #[derive(Component)]
-struct DebuffTime(usize);
+struct DebuffTime(bool, usize);
 #[derive(Component)]
 struct DebuffTip;
 
@@ -132,24 +133,28 @@ fn build(mut commands: Commands) {
             ..default()
         })
         .with_children(|col| {
+            // Buffs over debuffs, as they sit in the other game of this kind.
+            for buff in [true, false] {
+            let size = if buff { 32.0 } else { 42.0 };
             col.spawn(Node { flex_direction: FlexDirection::RowReverse, column_gap: Val::Px(5.0), ..default() }).with_children(|row| {
                 for i in 0..DEBUFFS {
                     row.spawn((
-                        DebuffSlot(i),
+                        DebuffSlot(buff, i),
                         Interaction::default(),
                         Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, display: Display::None, ..default() },
                     ))
                     .with_children(|s| {
                         s.spawn((
-                            DebuffIcon(i),
-                            Node { width: Val::Px(42.0), height: Val::Px(42.0), border: UiRect::all(Val::Px(2.0)), ..default() },
+                            DebuffIcon(buff, i),
+                            Node { width: Val::Px(size), height: Val::Px(size), border: UiRect::all(Val::Px(2.0)), ..default() },
                             ImageNode::default(),
                             BorderColor::all(ALERT),
                         ));
-                        s.spawn((DebuffTime(i), text(13.0, Color::WHITE)));
+                        s.spawn((DebuffTime(buff, i), text(12.0, Color::WHITE)));
                     });
                 }
             });
+            }
             col.spawn((DebuffTip, text(14.0, Color::srgb(1.0, 0.85, 0.7))));
         });
 }
@@ -160,7 +165,13 @@ fn what(d: &Debuff) -> &'static str {
 }
 
 fn secs(t: f32) -> String {
-    if t >= 10.0 { format!("{}s", t.ceil() as i32) } else { format!("{t:.1}s") }
+    if t >= 60.0 {
+        format!("{}m", (t / 60.0).ceil() as i32)
+    } else if t >= 10.0 {
+        format!("{}s", t.ceil() as i32)
+    } else {
+        format!("{t:.1}s")
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -267,36 +278,43 @@ fn debuffs(
     mut times: Query<(&DebuffTime, &mut Text), Without<DebuffTip>>,
     mut tip: Query<&mut Text, (With<DebuffTip>, Without<DebuffTime>)>,
 ) {
-    let list: Vec<Debuff> = if phase.get().in_match() {
-        fighters.iter().find(|f| f.player).map_or(Vec::new(), |f| f.unit.debuffs())
-    } else {
-        Vec::new()
-    };
+    let me = fighters.iter().find(|f| f.player).filter(|_| phase.get().in_match());
+    let harm: Vec<Debuff> = me.map_or(Vec::new(), |f| f.unit.debuffs());
+    let help: Vec<Debuff> = me.map_or(Vec::new(), |f| f.unit.buffs());
+    let list = |buff: bool| if buff { &help } else { &harm };
     let mut hovered = None;
     for (s, i, mut n) in &mut slots {
-        let want = if s.0 < list.len() { Display::Flex } else { Display::None };
+        let want = if s.1 < list(s.0).len() { Display::Flex } else { Display::None };
         if n.display != want {
             n.display = want;
         }
         if *i != Interaction::None {
-            hovered = list.get(s.0);
+            hovered = list(s.0).get(s.1);
         }
     }
     for (p, mut img, mut border) in &mut pics {
-        let Some(d) = list.get(p.0) else { continue };
+        let Some(d) = list(p.0).get(p.1) else { continue };
         let h = icons.get(d.key);
         if img.image != h {
             img.image = h;
         }
         // Red for a control, the school's colour for the rest.
-        *border = BorderColor::all(if d.ctl.is_some() { ALERT } else { fx::color(d.school) });
+        *border = BorderColor::all(if p.0 {
+            Color::srgb(0.75, 0.6, 0.3)
+        } else if d.ctl.is_some() {
+            ALERT
+        } else {
+            fx::color(d.school)
+        });
     }
     for (t, mut s) in &mut times {
-        if let Some(d) = list.get(t.0) {
+        if let Some(d) = list(t.0).get(t.1) {
             s.0 = secs(d.left);
         }
     }
     if let Ok(mut t) = tip.single_mut() {
-        t.0 = hovered.map_or(String::new(), |d| format!("{}: {}", d.name, what(d)));
+        t.0 = hovered.map_or(String::new(), |d| {
+            if d.ctl.is_some() || harm.contains(d) { format!("{}: {}", d.name, what(d)) } else { d.name.to_string() }
+        });
     }
 }

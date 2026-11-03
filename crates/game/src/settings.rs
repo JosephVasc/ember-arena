@@ -27,6 +27,7 @@ pub enum Action {
     Trinket,
     Attack,
     Ability(usize),
+    Buff(usize),
 }
 
 impl Action {
@@ -45,6 +46,7 @@ impl Action {
             Action::Attack,
         ];
         v.extend((0..10).map(Action::Ability));
+        v.extend((0..2).map(Action::Buff));
         v
     }
 
@@ -62,6 +64,7 @@ impl Action {
             Action::Trinket => "Trinket".into(),
             Action::Attack => "Auto attack on / off".into(),
             Action::Ability(i) => format!("Action button {}", i + 1),
+            Action::Buff(i) => format!("Buff {}", i + 1),
         }
     }
 
@@ -69,6 +72,7 @@ impl Action {
     fn id(self) -> String {
         match self {
             Action::Ability(i) => format!("ability{}", i + 1),
+            Action::Buff(i) => format!("buff{}", i + 1),
             a => format!("{a:?}").to_lowercase(),
         }
     }
@@ -87,6 +91,8 @@ impl Action {
             Action::Trinket => KeyCode::KeyQ,
             Action::Attack => KeyCode::KeyR,
             Action::Ability(i) => DIGITS[i],
+            Action::Buff(0) => KeyCode::KeyV,
+            Action::Buff(_) => KeyCode::KeyB,
         }
     }
 }

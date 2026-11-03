@@ -46,6 +46,9 @@ fn build(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             add(s.key, tint(s.school, c.color), &mut images);
         }
         add(c.auto.key, tint(c.auto.school, c.color), &mut images);
+        for b in c.buffs {
+            add(b.key, tint(b.school, c.color), &mut images);
+        }
     }
     add(TRINKET, School::Holy.color(), &mut images);
     commands.insert_resource(icons);
@@ -116,6 +119,19 @@ fn look(key: &str) -> Option<(Glyph, f32)> {
         "white_knives" => (Daggers, 0.0),
         "auto_shot" => (Arrow, Q),
         "white_staff" | "white_wand" => (Hammer, Q),
+        // Buffs.
+        "battle_hymn" => (Shout, 0.0),
+        "steel_resolve" => (ShieldCross, 0.0),
+        "war_drums" => (Medallion, 0.0),
+        "savage_fury" => (Flame, 0.0),
+        "aether_insight" => (Eye, 0.0),
+        "frost_mantle" => (Shield, 0.0),
+        "venom_coating" => (Dagger, Q),
+        "keen_edge" => (Sword, Q),
+        "hawks_eye" => (Eye, 0.0),
+        "pack_instinct" => (Fang, 0.0),
+        "vitality" => (Heart, 0.0),
+        "inner_calm" => (Moon, 0.0),
         // Vanguard.
         "steel_strike" => (Sword, Q),
         "rending_strike" => (Slash, 0.0),
@@ -528,7 +544,7 @@ mod tests {
     fn every_ability_has_its_own_icon_within_its_class() {
         for c in CLASSES {
             let mut seen: Vec<(String, School)> = Vec::new();
-            for s in c.spells {
+            for s in c.spells.iter().chain(c.buffs) {
                 let (g, _) = look(s.key).unwrap_or_else(|| panic!("{} has no icon", s.key));
                 let id = (format!("{g:?}"), s.school);
                 assert!(!seen.contains(&id), "{}: {} looks like another {} ability", c.name, s.key, id.0);

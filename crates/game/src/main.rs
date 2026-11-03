@@ -9,6 +9,7 @@ mod auto;
 mod camera;
 mod fight;
 mod fx;
+mod gates;
 mod icons;
 mod input;
 mod minimap;
@@ -37,6 +38,7 @@ fn main() {
             arena::plugin,
             camera::plugin,
             fight::plugin,
+            gates::plugin,
             input::plugin,
             fx::plugin,
             icons::plugin,

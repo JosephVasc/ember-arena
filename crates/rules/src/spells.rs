@@ -68,6 +68,8 @@ pub enum Aim {
     Myself,
     /// Every enemy within `radius` of you.
     Around,
+    /// Your whole team.
+    Party,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -82,6 +84,12 @@ pub enum AuraKind {
     Taken(f32),
     /// Damage dealt multiplier.
     Dealt(f32),
+    /// Maximum health multiplier.
+    Health(f32),
+    /// Added chance to critically strike.
+    Crit(f32),
+    /// Added mana a second.
+    Regen(f32),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -136,6 +144,8 @@ pub enum Use {
     /// Get away.
     Escape,
     Cleanse,
+    /// A long buff, cast at the gates.
+    Buff,
     /// The white hit: not on the bar, it swings by itself while attacking.
     Auto,
 }
@@ -238,7 +248,10 @@ pub struct Class {
     /// The white hit or auto shot: `cooldown` is its swing time, `gain` the rage each swing builds.
     /// A caster's is a feeble swing of the staff.
     pub auto: &'static Spell,
+    /// The ten abilities on the bar.
     pub spells: &'static [Spell],
+    /// Two long buffs, on the bar after the abilities (slots 10 and 11).
+    pub buffs: &'static [Spell],
 }
 
 pub static CLASSES: &[Class] = &[
@@ -265,6 +278,10 @@ pub static CLASSES: &[Class] = &[
             spell!("iron_wall", "Iron Wall", Physical, Myself, Defensive { cooldown: 60.0, gcd: false, free: true, aura: aura(AuraKind::Taken(0.5), 8.0) }),
             spell!("second_wind", "Second Wind", Holy, Myself, Defensive { cooldown: 45.0, cost: 20.0, aura: aura(AuraKind::Hot(18.0), 10.0) }),
         ],
+        buffs: &[
+            spell!("battle_hymn", "Battle Hymn", Holy, Party, Buff { range: 40.0, aura: aura(AuraKind::Dealt(1.06), 1800.0) }),
+            spell!("steel_resolve", "Steel Resolve", Physical, Myself, Buff { range: 40.0, aura: aura(AuraKind::Taken(0.92), 1800.0) }),
+        ],
     },
     Class {
         key: "berserker",
@@ -288,6 +305,10 @@ pub static CLASSES: &[Class] = &[
             spell!("red_mist", "Red Mist", Physical, Myself, Burst { cooldown: 60.0, gcd: false, aura: aura(AuraKind::Dealt(1.3), 15.0) }),
             spell!("hardened_skin", "Hardened Skin", Nature, Myself, Defensive { cooldown: 60.0, gcd: false, free: true, aura: aura(AuraKind::Taken(0.6), 10.0) }),
             spell!("hurl_axe", "Hurl Axe", Physical, Enemy, Snare { range: 25.0, damage: 18.0, cost: 10.0, cooldown: 10.0, ctl: Some(Ctl::Slow(0.6, 6.0)) }),
+        ],
+        buffs: &[
+            spell!("war_drums", "War Drums", Physical, Party, Buff { range: 40.0, aura: aura(AuraKind::Crit(0.05), 1800.0) }),
+            spell!("savage_fury", "Savage Fury", Fire, Myself, Buff { range: 40.0, aura: aura(AuraKind::Dealt(1.08), 1800.0) }),
         ],
     },
     Class {
@@ -313,6 +334,10 @@ pub static CLASSES: &[Class] = &[
             spell!("shatter_shard", "Shatter Shard", Frost, Enemy, Damage { damage: 14.0, cost: 3.0, special: Special::Shatter(3.0) }),
             spell!("deep_chill", "Deep Chill", Frost, Enemy, Control { damage: 20.0, cost: 6.0, cooldown: 30.0, ctl: Some(Ctl::Stun(5.0)) }),
         ],
+        buffs: &[
+            spell!("aether_insight", "Aether Insight", Arcane, Party, Buff { range: 40.0, aura: aura(AuraKind::Regen(1.0), 1800.0) }),
+            spell!("frost_mantle", "Frost Mantle", Frost, Myself, Buff { range: 40.0, aura: aura(AuraKind::Taken(0.9), 1800.0) }),
+        ],
     },
     Class {
         key: "shadowblade",
@@ -336,6 +361,10 @@ pub static CLASSES: &[Class] = &[
             spell!("shadow_step", "Shadow Step", Shadow, Enemy, Gap { range: 25.0, cooldown: 20.0, gcd: false, special: Special::Behind }),
             spell!("shadow_cloak", "Shadow Cloak", Shadow, Myself, Defensive { cooldown: 90.0, gcd: false, special: Special::Immune(3.0) }),
             spell!("parry_dance", "Parry Dance", Physical, Myself, Defensive { cooldown: 60.0, gcd: false, free: true, aura: aura(AuraKind::Taken(0.5), 10.0) }),
+        ],
+        buffs: &[
+            spell!("venom_coating", "Venom Coating", Nature, Myself, Buff { range: 40.0, aura: aura(AuraKind::Dealt(1.08), 1800.0) }),
+            spell!("keen_edge", "Keen Edge", Shadow, Myself, Buff { range: 40.0, aura: aura(AuraKind::Crit(0.08), 1800.0) }),
         ],
     },
     Class {
@@ -361,6 +390,10 @@ pub static CLASSES: &[Class] = &[
             spell!("final_shot", "Final Shot", Physical, Enemy, Burst { range: 35.0, damage: 40.0, cost: 6.0, cooldown: 10.0, special: Special::Execute(0.2) }),
             spell!("sleep_dart", "Sleep Dart", Nature, Enemy, Control { range: 20.0, cost: 6.0, cooldown: 30.0, ctl: Some(Ctl::Incap(4.0)) }),
         ],
+        buffs: &[
+            spell!("hawks_eye", "Hawk's Eye", Nature, Myself, Buff { range: 40.0, aura: aura(AuraKind::Dealt(1.08), 1800.0) }),
+            spell!("pack_instinct", "Pack Instinct", Arcane, Party, Buff { range: 40.0, aura: aura(AuraKind::Crit(0.04), 1800.0) }),
+        ],
     },
     Class {
         key: "mystic",
@@ -385,12 +418,19 @@ pub static CLASSES: &[Class] = &[
             spell!("guardian_ward", "Guardian Ward", Holy, Friend, Defensive { range: 40.0, cooldown: 60.0, gcd: false, free: true, aura: aura(AuraKind::Taken(0.6), 8.0) }),
             spell!("cleanse", "Cleanse", Holy, Friend, Cleanse { range: 40.0, cost: 5.0, special: Special::Cleanse }),
         ],
+        buffs: &[
+            spell!("vitality", "Vitality", Holy, Party, Buff { range: 40.0, aura: aura(AuraKind::Health(1.12), 1800.0) }),
+            spell!("inner_calm", "Inner Calm", Holy, Myself, Buff { range: 40.0, aura: aura(AuraKind::Regen(1.5), 1800.0) }),
+        ],
     },
 ];
 
 pub fn class(key: &str) -> &'static Class {
     CLASSES.iter().find(|c| c.key == key).unwrap_or_else(|| panic!("no class {key:?}"))
 }
+
+/// The chance of a critical strike before buffs.
+pub const BASE_CRIT: f32 = 0.1;
 
 /// The arena trinket: breaks every control, once every two minutes.
 pub const TRINKET_COOLDOWN: f32 = 120.0;
@@ -410,6 +450,21 @@ mod tests {
         let all: Vec<&str> = CLASSES.iter().flat_map(|c| c.spells.iter().map(|s| s.key)).collect();
         for (i, k) in all.iter().enumerate() {
             assert!(!all[i + 1..].contains(k), "{k} twice");
+        }
+    }
+
+    #[test]
+    fn every_class_has_two_buffs_that_last_the_match() {
+        let mut names: Vec<&str> = CLASSES.iter().flat_map(|c| c.spells.iter().map(|s| s.key)).collect();
+        for c in CLASSES {
+            assert_eq!(c.buffs.len(), 2, "{}", c.name);
+            for b in c.buffs {
+                assert_eq!(b.ai, Use::Buff, "{}", b.key);
+                assert!(b.aura.is_some_and(|a| a.secs > 600.0), "{}", b.key);
+                assert!(b.cast == 0.0 && b.cost == 0.0 && b.cooldown == 0.0, "{}", b.key);
+                assert!(!names.contains(&b.key), "{} twice", b.key);
+                names.push(b.key);
+            }
         }
     }
 

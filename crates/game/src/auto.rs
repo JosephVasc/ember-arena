@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use crate::camera::Cam;
-use crate::fight::Fighter;
+use crate::fight::{Fighter, Match};
 use crate::{Phase, Selection};
 
 /// Present while the autopilot plays.
@@ -56,6 +56,7 @@ fn drive(
     phase: Res<State<Phase>>,
     mut sel: ResMut<Selection>,
     mut cam: ResMut<Cam>,
+    mut state: ResMut<Match>,
     fighters: Query<(&Fighter, &Transform)>,
     mut next: ResMut<NextState<Phase>>,
     mut exit: MessageWriter<AppExit>,
@@ -72,6 +73,10 @@ fn drive(
         if auto.t > 2.0 {
             next.set(Phase::Gates);
         }
+    }
+    // Long enough at the gates to see everyone buff, no longer.
+    if *phase.get() == Phase::Gates {
+        state.gates_t = state.gates_t.min(8.0);
     }
     // The camera rides behind you, as a player's would.
     if let Some((_, tf)) = fighters.iter().find(|(f, _)| f.player) {

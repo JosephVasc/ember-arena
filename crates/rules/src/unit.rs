@@ -4,7 +4,7 @@
 
 use crate::Pt;
 use crate::control::{Ctl, Held, Landed};
-use crate::spells::{Aim, AuraDef, AuraKind, Class, GCD, Resource, School, Special, Spell, TRINKET_COOLDOWN, Use};
+use crate::spells::{Aim, AuraDef, AuraKind, BASE_CRIT, Class, GCD, Resource, School, Special, Spell, TRINKET_COOLDOWN, Use};
 
 /// An aura on a unit: a dot, hot, absorb or modifier, from an ability.
 #[derive(Clone, Copy, Debug)]
@@ -153,7 +153,7 @@ impl Unit {
             cc: Held::default(),
             marks: Vec::new(),
             auras: Vec::new(),
-            cds: vec![0.0; class.spells.len()],
+            cds: vec![0.0; class.spells.len() + class.buffs.len()],
             gcd: 0.0,
             casting: None,
             immune_t: 0.0,
@@ -166,8 +166,47 @@ impl Unit {
         }
     }
 
+    /// An ability by bar slot: the ten abilities, then the buffs.
     pub fn spell(&self, slot: usize) -> &'static Spell {
-        &self.class.spells[slot]
+        let n = self.class.spells.len();
+        if slot < n { &self.class.spells[slot] } else { &self.class.buffs[slot - n] }
+    }
+
+    /// The chance of a critical strike now.
+    pub fn crit_chance(&self) -> f32 {
+        BASE_CRIT + self.auras.iter().map(|a| if let AuraKind::Crit(c) = a.def.kind { c } else { 0.0 }).sum::<f32>()
+    }
+
+    /// Maximum health follows the buffs; gaining some heals by as much, losing it never kills.
+    fn refresh_health(&mut self) {
+        let max = self.class.health * self.modifier(|k| if let AuraKind::Health(m) = k { Some(m) } else { None });
+        if !self.dead {
+            self.hp = (self.hp + (max - self.max_hp).max(0.0)).min(max).max(1.0);
+        }
+        self.max_hp = max;
+    }
+
+    /// The gates open: full health and resource (rage starts from nothing), cooldowns ready.
+    pub fn prepare(&mut self) {
+        self.hp = self.max_hp;
+        if self.class.resource != Resource::Rage {
+            self.res = MAX_RES;
+        }
+        self.cds.iter_mut().for_each(|c| *c = 0.0);
+        self.gcd = 0.0;
+        self.swing = 0.0;
+    }
+
+    /// Everything helpful on the unit now.
+    pub fn buffs(&self) -> Vec<Debuff> {
+        if self.dead {
+            return Vec::new();
+        }
+        self.auras
+            .iter()
+            .filter(|a| !a.harmful)
+            .map(|a| Debuff { key: a.key, name: a.name, school: a.school, left: a.left, total: a.def.secs, ctl: None })
+            .collect()
     }
 
     pub fn hp_frac(&self) -> f32 {
@@ -212,7 +251,7 @@ impl Unit {
             return Err(Fail::Moving);
         }
         match spell.aim {
-            Aim::Myself | Aim::Around => Ok(()),
+            Aim::Myself | Aim::Around | Aim::Party => Ok(()),
             Aim::Friend => match s.target {
                 // A friendly ability on no friend lands on yourself.
                 Some(t) if !t.hostile && !t.dead => {
@@ -377,8 +416,9 @@ impl Unit {
         self.trinket_cd = (self.trinket_cd - dt).max(0.0);
         self.swing = (self.swing - dt).max(0.0);
         self.cc.tick(dt);
+        let bonus = self.auras.iter().map(|a| if let AuraKind::Regen(r) = a.def.kind { r } else { 0.0 }).sum::<f32>();
         let regen = match self.class.resource {
-            Resource::Mana => 1.2,
+            Resource::Mana => 1.2 + bonus,
             Resource::Energy => 10.0,
             Resource::Rage => -0.5,
         };
@@ -402,6 +442,7 @@ impl Unit {
             }
         }
         self.auras.retain(|a| a.left > 0.0 && !(matches!(a.def.kind, AuraKind::Absorb(_)) && a.pool <= 0.0));
+        self.refresh_health();
         if dot > 0.0 {
             out.extend(self.take(dot, school, false));
         }
@@ -558,6 +599,7 @@ pub fn land(spell: &'static Spell, src: Source, target: &mut Unit) -> (Vec<Feedb
             pool,
             harmful: src.hostile,
         });
+        target.refresh_health();
     }
     if let Some(ctl) = spell.ctl {
         if !target.dead {
@@ -776,6 +818,62 @@ mod tests {
         m.attacking = true;
         assert!(m.can_swing(at(3.0)));
         assert_eq!(m.check_auto(at(20.0)), Err(Fail::OutOfRange));
+    }
+
+    #[test]
+    fn buffs_raise_health_damage_crit_and_regen() {
+        let mut u = Unit::new(class("arcanist"));
+        let friend = Source { hostile: false, ..HIT };
+        let base = u.max_hp;
+        let healer = class("mystic");
+        land(&healer.buffs[0], friend, &mut u);
+        assert_eq!(u.max_hp, base * 1.12);
+        assert_eq!(u.hp, u.max_hp, "the extra health comes filled");
+        assert_eq!(u.buffs()[0].key, "vitality");
+        assert!(u.debuffs().is_empty());
+        // The same buff twice doesn't stack.
+        land(&healer.buffs[0], friend, &mut u);
+        assert_eq!(u.max_hp, base * 1.12);
+        let r = class("ranger");
+        land(&r.buffs[1], friend, &mut u);
+        assert!((u.crit_chance() - (BASE_CRIT + 0.04)).abs() < 1e-5);
+        let d = u.dealt();
+        land(&r.buffs[0], friend, &mut u);
+        assert!(u.dealt() > d);
+        u.res = 0.0;
+        u.tick(1.0);
+        assert!(u.res > 1.2 - 1e-3);
+    }
+
+    #[test]
+    fn a_cleanse_or_immunity_leaves_buffs_alone() {
+        let mut u = Unit::new(class("vanguard"));
+        let friend = Source { hostile: false, ..HIT };
+        land(&class("mystic").buffs[0], friend, &mut u);
+        let cleanse = Unit::new(class("mystic"));
+        land(cleanse.spell(slot(&cleanse, "cleanse")), friend, &mut u);
+        assert_eq!(u.buffs().len(), 1);
+    }
+
+    #[test]
+    fn the_buff_slots_follow_the_abilities() {
+        let u = Unit::new(class("mystic"));
+        assert_eq!(u.spell(10).key, "vitality");
+        assert_eq!(u.spell(11).key, "inner_calm");
+        assert_eq!(u.check(10, Situation { target: None, moving: true }), Ok(()));
+    }
+
+    #[test]
+    fn the_gates_opening_refills_all_but_rage() {
+        let mut m = Unit::new(class("arcanist"));
+        m.res = 10.0;
+        m.hp = 5.0;
+        m.gcd = 1.0;
+        m.prepare();
+        assert_eq!((m.res, m.hp, m.gcd), (MAX_RES, m.max_hp, 0.0));
+        let mut v = Unit::new(class("vanguard"));
+        v.prepare();
+        assert_eq!(v.res, 0.0);
     }
 
     #[test]
