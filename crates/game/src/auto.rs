@@ -88,7 +88,7 @@ fn drive(
     for (f, tf) in &fighters {
         let near = me.is_some_and(|m| m.distance(tf.translation) < 18.0);
         for d in f.unit.debuffs() {
-            let Some(c) = d.ctl.filter(|_| near && d.left < d.total - 0.3) else { continue };
+            let Some(c) = d.ctl.filter(|_| near && d.left < d.total - 0.7) else { continue };
             if !auto.caught.contains(&c.name()) {
                 auto.caught.push(c.name());
                 let path = auto.dir.join(format!("cc-{}.png", c.name()));

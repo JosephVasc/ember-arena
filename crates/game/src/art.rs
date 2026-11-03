@@ -361,8 +361,12 @@ fn drive_anims(
                 anim.once = None;
             }
         }
+        // A stun or an incapacitate takes the body at once, over whatever it was doing.
         let want = if anim.dead {
             Clip::Death
+        } else if matches!(anim.base, Clip::Stunned | Clip::Incapped) {
+            anim.once = None;
+            anim.base
         } else {
             anim.once.map_or(anim.base, |(c, _)| c)
         };
