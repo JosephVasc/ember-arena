@@ -21,8 +21,8 @@ pub struct Autopilot {
     t: f32,
     shot_t: f32,
     shots: u32,
-    /// The moment you first lost control has been captured.
-    caught_cc: bool,
+    /// The kinds of control already captured.
+    caught: Vec<&'static str>,
 }
 
 fn env<T: std::str::FromStr>(key: &str) -> Option<T> {
@@ -43,7 +43,7 @@ pub fn plugin(app: &mut App) {
         t: 0.0,
         shot_t: 4.0,
         shots: 0,
-        caught_cc: false,
+        caught: Vec::new(),
     })
     .add_systems(Update, drive);
 }
@@ -83,11 +83,18 @@ fn drive(
         let fwd = tf.rotation * Vec3::Z;
         cam.yaw = fwd.x.atan2(fwd.z);
     }
-    let controlled = fighters.iter().any(|(f, _)| f.player && f.unit.loss_of_control().is_some_and(|d| d.left < d.total - 0.2));
-    if controlled && !auto.caught_cc {
-        auto.caught_cc = true;
-        let path = auto.dir.join("controlled.png");
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+    // One picture of each kind of control, on someone near enough the camera to see.
+    let me = fighters.iter().find(|(f, _)| f.player).map(|(_, t)| t.translation);
+    for (f, tf) in &fighters {
+        let near = me.is_some_and(|m| m.distance(tf.translation) < 18.0);
+        for d in f.unit.debuffs() {
+            let Some(c) = d.ctl.filter(|_| near && d.left < d.total - 0.3) else { continue };
+            if !auto.caught.contains(&c.name()) {
+                auto.caught.push(c.name());
+                let path = auto.dir.join(format!("cc-{}.png", c.name()));
+                commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+            }
+        }
     }
     auto.shot_t -= dt;
     if auto.shot_t <= 0.0 {

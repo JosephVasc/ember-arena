@@ -61,6 +61,7 @@ pub enum Fail {
     NotReady,
     Busy,
     Held,
+    Rooted,
     Silenced,
     NoResource,
     NoTarget,
@@ -78,6 +79,7 @@ impl Fail {
             Self::NotReady => "Ability is not ready yet",
             Self::Busy => "Another action is in progress",
             Self::Held => "You can't do that while held",
+            Self::Rooted => "You can't do that while rooted",
             Self::Silenced => "Can't do that while silenced",
             Self::NoResource => "Not enough resource",
             Self::NoTarget => "You have no target",
@@ -243,6 +245,9 @@ impl Unit {
         }
         if self.cc.silence_t > 0.0 && !spell.free && spell.school != School::Physical {
             return Err(Fail::Silenced);
+        }
+        if self.cc.root_t > 0.0 && matches!(spell.special, Special::Charge | Special::LeapTo) {
+            return Err(Fail::Rooted);
         }
         if spell.cost > self.res {
             return Err(Fail::NoResource);
@@ -874,6 +879,18 @@ mod tests {
         let mut v = Unit::new(class("vanguard"));
         v.prepare();
         assert_eq!(v.res, 0.0);
+    }
+
+    #[test]
+    fn a_root_stops_a_charge_but_not_a_blink() {
+        let mut v = Unit::new(class("vanguard"));
+        let rush = slot(&v, "shield_rush");
+        assert_eq!(v.check(rush, at(15.0)), Ok(()));
+        v.cc.land(Ctl::Root(3.0), 1.0, [0.0; 2]);
+        assert_eq!(v.check(rush, at(15.0)), Err(Fail::Rooted));
+        let mut m = Unit::new(class("arcanist"));
+        m.cc.land(Ctl::Root(3.0), 1.0, [0.0; 2]);
+        assert_eq!(m.check(slot(&m, "phase_step"), at(15.0)), Ok(()));
     }
 
     #[test]

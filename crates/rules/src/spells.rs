@@ -104,8 +104,10 @@ pub enum Special {
     None,
     /// Jump this far toward where you face, out of roots and stuns.
     Blink(f32),
-    /// Rush to the target.
+    /// Run to the target at speed; what it does lands on arrival.
     Charge,
+    /// Leap through the air to the target, landing as a charge does.
+    LeapTo,
     /// Step behind the target.
     Behind,
     /// Leap this far backward.
@@ -298,7 +300,7 @@ pub static CLASSES: &[Class] = &[
             spell!("wide_chop", "Wide Chop", Physical, Enemy, Filler { range: MELEE, damage: 22.0, gain: 15.0 }),
             spell!("gorge", "Gorge", Physical, Enemy, Damage { range: MELEE, damage: 42.0, cost: 25.0, cooldown: 6.0, special: Special::Drain(0.3) }),
             spell!("gash", "Gash", Physical, Enemy, Snare { range: MELEE, damage: 8.0, cost: 10.0, ctl: Some(Ctl::Slow(0.5, 10.0)) }),
-            spell!("skull_leap", "Skull Leap", Physical, Enemy, Gap { range: 30.0, cooldown: 20.0, gcd: false, special: Special::Charge }),
+            spell!("skull_leap", "Skull Leap", Physical, Enemy, Gap { range: 30.0, cooldown: 20.0, gcd: false, special: Special::LeapTo }),
             spell!("throat_punch", "Throat Punch", Physical, Enemy, Interrupt { range: MELEE, cost: 10.0, cooldown: 10.0, gcd: false, damage: 6.0, ctl: Some(Ctl::Interrupt(4.0)) }),
             spell!("bonebreaker", "Bonebreaker", Physical, Enemy, Control { range: MELEE, cost: 15.0, cooldown: 30.0, damage: 12.0, ctl: Some(Ctl::Stun(4.0)) }),
             spell!("bellow", "Bellow", Physical, Around, Control { radius: 8.0, cost: 20.0, cooldown: 30.0, ctl: Some(Ctl::Fear(6.0)) }),

@@ -17,7 +17,7 @@ use crate::{MatchEntity, Phase, Selection, Step};
 pub fn plugin(app: &mut App) {
     app.add_systems(Startup, build_screens).add_systems(
         Update,
-        (show_screens, menu_input, refresh_menu, frames, action_bar, slot_feedback, slot_clicks, banners, plates, refresh_results)
+        (show_screens, menu_input, refresh_menu, frames, action_bar, slot_feedback, slot_clicks, banners, plates, plate_controls, refresh_results)
             .in_set(Step::Show),
     );
 }
@@ -421,7 +421,8 @@ pub fn describe(s: &Spell) -> String {
     match s.special {
         Special::Blink(d) => parts.push(format!("blinks {d} yd forward, breaking stuns and roots")),
         Special::Leap(d) => parts.push(format!("leaps {d} yd back")),
-        Special::Charge => parts.push("charges the target".into()),
+        Special::Charge => parts.push("runs to the target at speed; roots stop it".into()),
+        Special::LeapTo => parts.push("leaps to the target; roots stop it".into()),
         Special::Behind => parts.push("steps behind the target".into()),
         Special::Immune(t) => parts.push(format!("immune to everything for {t}s, breaking all controls")),
         Special::Cleanse => parts.push("removes fears, roots, silences, incapacitates and damage over time".into()),
@@ -671,7 +672,7 @@ fn action_bar(
         };
         let bad = matches!(
             check,
-            Err(Fail::NoResource | Fail::OutOfRange | Fail::NoSight | Fail::WrongTarget | Fail::NoTarget | Fail::Held | Fail::Silenced)
+            Err(Fail::NoResource | Fail::OutOfRange | Fail::NoSight | Fail::WrongTarget | Fail::NoTarget | Fail::Held | Fail::Rooted | Fail::Silenced)
         );
         bg.0 = if bad { Color::srgba(0.6, 0.05, 0.05, 0.45) } else { Color::NONE };
     }
@@ -820,6 +821,12 @@ fn banners(
     }
 }
 
+/// The big icon above a nameplate while that fighter is controlled, and its timer.
+#[derive(Component)]
+struct PlateIcon(Entity);
+#[derive(Component)]
+struct PlateTime(Entity);
+
 /// A nameplate's root, following its fighter.
 #[derive(Component)]
 struct Plate(Entity);
@@ -854,6 +861,26 @@ fn plates(
                 GlobalZIndex(-1),
             ))
             .with_children(|p| {
+                p.spawn((
+                    PlateIcon(e),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        bottom: Val::Percent(100.0),
+                        width: Val::Px(38.0),
+                        height: Val::Px(38.0),
+                        margin: UiRect::bottom(Val::Px(3.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        display: Display::None,
+                        ..default()
+                    },
+                    ImageNode::default(),
+                    BorderColor::all(Color::srgb(1.0, 0.3, 0.2)),
+                ))
+                .with_children(|i| {
+                    i.spawn((PlateTime(e), label("", 15.0, Color::WHITE)));
+                });
                 p.spawn((Bind(Who::Plate(e), Part::Name), label("", 13.0, Color::WHITE)));
                 bar(p, Who::Plate(e), Part::Hp, 90.0, 9.0, HP_FOE, None);
                 bar(p, Who::Plate(e), Part::Cast, 90.0, 7.0, CAST, None);
@@ -892,6 +919,33 @@ fn plates(
                 continue;
             }
             fill(bind.1, f, my_team, n, t, bg);
+        }
+    }
+}
+
+/// Who's controlled reads from across the arena: the control's icon and timer over their plate.
+fn plate_controls(
+    icons: Res<Icons>,
+    fighters: Query<&Fighter>,
+    mut pics: Query<(&PlateIcon, &mut Node, &mut ImageNode)>,
+    mut times: Query<(&PlateTime, &mut Text)>,
+) {
+    for (p, mut n, mut img) in &mut pics {
+        let d = fighters.get(p.0).ok().and_then(|f| f.unit.loss_of_control());
+        let want = if d.is_some() { Display::Flex } else { Display::None };
+        if n.display != want {
+            n.display = want;
+        }
+        if let Some(d) = d {
+            let h = icons.get(d.key);
+            if img.image != h {
+                img.image = h;
+            }
+        }
+    }
+    for (p, mut t) in &mut times {
+        if let Some(d) = fighters.get(p.0).ok().and_then(|f| f.unit.loss_of_control()) {
+            t.0 = format!("{:.0}", d.left.ceil());
         }
     }
 }

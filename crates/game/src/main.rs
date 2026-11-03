@@ -14,6 +14,7 @@ mod icons;
 mod input;
 mod minimap;
 mod settings;
+mod statusfx;
 mod ui;
 
 use bevy::prelude::*;
@@ -46,6 +47,7 @@ fn main() {
             ui::plugin,
             auto::plugin,
             settings::plugin,
+            statusfx::plugin,
             minimap::plugin,
         ))
         .add_systems(OnEnter(Phase::Paused), |mut t: ResMut<Time<Virtual>>| t.pause())

@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use rules::ai::{self, Brain, Seen};
 use rules::arena::ArenaDef;
 use rules::control::Ctl;
-use rules::spells::{self, Aim, Role, Special, Spell, Use};
+use rules::spells::{self, Aim, Role, School, Special, Spell, Use};
 use rules::unit::{self, Feedback, Situation, Source, TargetInfo, Unit};
 
 use crate::art::{self, Anim, Clip, character};
@@ -27,7 +27,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, prep_buffs.in_set(Step::Think).run_if(in_state(Phase::Gates)))
         .add_systems(
             Update,
-            (steer, gravity, advance, swings, resolve, fly, arrive, deaths, verdict)
+            (steer, dashes, gravity, advance, swings, resolve, fly, arrive, deaths, verdict)
                 .chain()
                 .in_set(Step::Resolve)
                 .run_if(in_state(Phase::Fight).or(in_state(Phase::Gates))),
@@ -44,6 +44,10 @@ pub const BODY: f32 = 0.6;
 const GATES_SECS: f32 = 30.0;
 pub const READY_SECS: f32 = 3.0;
 const BOLT_SPEED: f32 = 40.0;
+/// Yards a second: a charge, a leap, and a roll.
+const CHARGE_SPEED: f32 = 30.0;
+const LEAP_SPEED: f32 = 26.0;
+const ROLL_SPEED: f32 = 20.0;
 
 /// How a fighter is moving this frame, for its animation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -74,6 +78,23 @@ pub struct Fighter {
     /// Height above the floor while jumping, and the upward speed.
     pub air: f32,
     pub vy: f32,
+    /// Under way on a charge, leap or roll: the body isn't its own until it's over.
+    pub dash: Option<Dash>,
+}
+
+/// A body hurtling somewhere.
+#[derive(Clone, Copy)]
+pub struct Dash {
+    /// Who it's after, or `None` for a spot on the floor.
+    target: Option<Entity>,
+    point: Vec3,
+    speed: f32,
+    /// What lands on arrival.
+    arrive: Option<Arrive>,
+    /// Seconds before it gives up (a pillar in the way).
+    left: f32,
+    /// Going backward, still facing forward.
+    backward: bool,
 }
 
 impl Fighter {
@@ -186,6 +207,7 @@ fn spawn_match(
                         stride: Stride::Still,
                         air: 0.0,
                         vy: 0.0,
+                        dash: None,
                     },
                 ))
                 .observe(art::on_ready)
@@ -364,7 +386,7 @@ fn steer(
         if f.player {
             focus.0 = tf.translation;
         }
-        if f.unit.dead || (f.player && auto.is_none()) {
+        if f.unit.dead || f.dash.is_some() || (f.player && auto.is_none()) {
             continue;
         }
         let pos = tf.translation;
@@ -395,6 +417,53 @@ fn steer(
                 }
             }
         }
+    }
+}
+
+/// Charges, leaps and rolls carry their bodies along; a stun or a root stops them dead, and what
+/// a charge carries lands when it arrives.
+fn dashes(
+    time: Res<Time>,
+    sel: Res<Selection>,
+    mut fighters: Query<(Entity, &mut Fighter, &mut Transform)>,
+    mut arrivals: MessageWriter<Arrive>,
+) {
+    let dt = time.delta_secs();
+    let arena = sel.arena();
+    let ids: Vec<Entity> = fighters.iter().filter(|(_, f, _)| f.dash.is_some()).map(|x| x.0).collect();
+    for me in ids {
+        let Ok((_, f, _)) = fighters.get(me) else { continue };
+        let Some(mut d) = f.dash else { continue };
+        let stopped = f.unit.dead || f.unit.cc.out() || f.unit.cc.root_t > 0.0;
+        let chased = d.target.and_then(|t| fighters.get(t).ok()).map(|(_, o, t)| (o.unit.dead, t.translation));
+        if let Some((_, p)) = chased {
+            d.point = p;
+        }
+        let lost = chased.is_some_and(|(dead, _)| dead) || (d.target.is_some() && chased.is_none());
+        let Ok((_, mut f, mut tf)) = fighters.get_mut(me) else { continue };
+        d.left -= dt;
+        if stopped || lost || d.left <= 0.0 {
+            f.dash = None;
+            continue;
+        }
+        let to = flat(d.point - tf.translation);
+        let step = d.speed * dt;
+        // Up to arm's length of a target, or onto a spot.
+        let stop = if d.target.is_some() { 1.5 } else { 0.1 };
+        if to.length() <= stop + step {
+            if let Some(a) = d.arrive {
+                arrivals.write(a);
+            }
+            f.dash = None;
+            continue;
+        }
+        let dir = to.normalize();
+        tf.translation = at(arena.confine(pt(tf.translation + dir * step), BODY));
+        f.stride = if d.backward { Stride::Back } else { Stride::Forward };
+        if !d.backward {
+            tf.rotation = yaw(dir);
+        }
+        f.dash = Some(d);
     }
 }
 
@@ -508,9 +577,26 @@ pub fn show(fx: &mut Fx, pos: Vec3, fb: Feedback) {
         Feedback::Heal(h) if h >= 1.0 => fx.text(pos, format!("+{}", h.round()), fx::HEAL, 18.0),
         Feedback::Heal(_) => {}
         Feedback::Immune => fx.text(pos, "Immune", fx::WHITE, 18.0),
-        Feedback::Ctl(Ctl::Slow(..)) => {}
-        Feedback::Ctl(c) => fx.text(pos, c.name(), fx::CRIT, 20.0),
-        Feedback::Interrupted => fx.text(pos, "Interrupted", fx::CRIT, 22.0),
+        // A control lands with a burst in its colour, and its name large.
+        Feedback::Ctl(c @ Ctl::Slow(..)) => {
+            fx.nova(pos, School::Frost, 1.8);
+            fx.text(pos, c.name(), fx::color(School::Frost), 17.0);
+        }
+        Feedback::Ctl(c) => {
+            let school = match c {
+                Ctl::Stun(_) => School::Holy,
+                Ctl::Root(_) => School::Frost,
+                Ctl::Fear(_) => School::Shadow,
+                _ => School::Arcane,
+            };
+            fx.nova(pos, school, 3.5);
+            fx.flash(pos, school, 2.2);
+            fx.text(pos, c.name(), fx::color(school), 26.0);
+        }
+        Feedback::Interrupted => {
+            fx.nova(pos, School::Arcane, 3.0);
+            fx.text(pos, "Interrupted", fx::CRIT, 26.0);
+        }
         Feedback::Cleansed => fx.text(pos, "Cleansed", fx::HEAL, 18.0),
     }
 }
@@ -556,8 +642,10 @@ fn resolve(
                     fx.flash(tf.translation, spell.school, 2.0);
                 }
                 Special::Leap(d) => {
-                    tf.translation = at(arena.confine(pt(me - fwd * d), BODY));
-                    fx.flash(tf.translation, spell.school, 1.5);
+                    // A roll back: the body goes there, still facing the fight.
+                    let spot = at(arena.confine(pt(me - fwd * d), BODY));
+                    f.dash = Some(Dash { target: None, point: spot, speed: ROLL_SPEED, arrive: None, left: 2.0, backward: true });
+                    anim.play(Clip::Roll, d / ROLL_SPEED);
                 }
                 _ => fx.nova(me, spell.school, 2.0),
             }
@@ -620,15 +708,27 @@ fn land_or_fly(
     }
     let hostile = fighters.get(caster).is_ok_and(|(f, _, _)| f.team != team_t);
     let src = Source { hostile, ..src };
+    let arrive = Arrive { caster, target, spell, src };
     match spell.special {
-        Special::Charge | Special::Behind => {
+        // A charge or a leap goes there under its own power, and lands on arrival.
+        Special::Charge | Special::LeapTo => {
+            if let Ok((mut f, tf, mut anim)) = fighters.get_mut(caster) {
+                let leap = spell.special == Special::LeapTo;
+                let speed = if leap { LEAP_SPEED } else { CHARGE_SPEED };
+                if leap {
+                    let t = flat(tf_t.translation - tf.translation).length() / speed;
+                    f.vy = GRAVITY * t * 0.5;
+                    f.air = 0.01;
+                    anim.play(Clip::Jump, t);
+                }
+                f.dash = Some(Dash { target: Some(target), point: tf_t.translation, speed, arrive: Some(arrive), left: 2.5, backward: false });
+            }
+            return;
+        }
+        // A step through the shadows really is a teleport.
+        Special::Behind => {
             if let Ok((_, mut tf, _)) = fighters.get_mut(caster) {
-                let to = flat(tf_t.translation - tf.translation).normalize_or(Vec3::Z);
-                let spot = if spell.special == Special::Behind {
-                    tf_t.translation - flat(tf_t.rotation * Vec3::Z).normalize_or(Vec3::Z) * 1.5
-                } else {
-                    tf_t.translation - to * 1.5
-                };
+                let spot = tf_t.translation - flat(tf_t.rotation * Vec3::Z).normalize_or(Vec3::Z) * 1.5;
                 fx.flash(tf.translation, spell.school, 1.5);
                 tf.translation = at(arena.confine(pt(spot), BODY));
                 tf.rotation = yaw(flat(tf_t.translation - tf.translation));
@@ -636,8 +736,7 @@ fn land_or_fly(
         }
         _ => {}
     }
-    let arrive = Arrive { caster, target, spell, src };
-    let ranged = hostile && spell.range > 6.0 && spell.special != Special::Charge && spell.special != Special::Behind;
+    let ranged = hostile && spell.range > 6.0 && spell.special != Special::Behind;
     if ranged {
         fx.glow_sphere(
             Bolt { arrive },
@@ -771,7 +870,12 @@ fn verdict(
 /// Each fighter's looping animation: running, strafing, backing up, casting, or standing.
 fn animate(mut fighters: Query<(&Fighter, &mut Anim)>) {
     for (f, mut anim) in &mut fighters {
-        anim.base = if f.unit.casting.is_some() {
+        anim.stride_speed = if f.dash.is_some() { 1.8 } else { f.unit.cc.speed() };
+        anim.base = if f.unit.cc.stun_t > 0.0 {
+            Clip::Stunned
+        } else if f.unit.cc.incap_t > 0.0 {
+            Clip::Incapped
+        } else if f.unit.casting.is_some() {
             Clip::Casting
         } else {
             match f.stride {

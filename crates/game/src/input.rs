@@ -86,7 +86,7 @@ fn move_player(
     let dt = time.delta_secs();
     let Some((mut f, mut tf, mut anim)) = fighters.iter_mut().find(|(f, _, _)| f.player) else { return };
     f.stride = Stride::Still;
-    if f.unit.dead {
+    if f.unit.dead || f.dash.is_some() {
         return;
     }
     let fwd = flat(tf.rotation * Vec3::Z).normalize_or(Vec3::Z);

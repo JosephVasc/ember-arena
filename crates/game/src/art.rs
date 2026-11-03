@@ -84,10 +84,16 @@ pub enum Clip {
     StrafeRight,
     Back,
     Jump,
+    /// Sat on the floor, dazed: a stun.
+    Stunned,
+    /// Flat on the ground: an incapacitate.
+    Incapped,
+    /// A roll backward.
+    Roll,
 }
 
 impl Clip {
-    const ALL: [Clip; 16] = [
+    const ALL: [Clip; 19] = [
         Clip::Idle,
         Clip::Run,
         Clip::Death,
@@ -104,6 +110,9 @@ impl Clip {
         Clip::StrafeRight,
         Clip::Back,
         Clip::Jump,
+        Clip::Stunned,
+        Clip::Incapped,
+        Clip::Roll,
     ];
 
     fn name(self) -> &'static str {
@@ -124,13 +133,16 @@ impl Clip {
             Clip::StrafeRight => "Running_Strafe_Right",
             Clip::Back => "Walking_Backwards",
             Clip::Jump => "Jump_Full_Short",
+            Clip::Stunned => "Sit_Floor_Idle",
+            Clip::Incapped => "Lie_Idle",
+            Clip::Roll => "Dodge_Backward",
         }
     }
 
     fn looped(self) -> bool {
         matches!(
             self,
-            Clip::Idle | Clip::Run | Clip::Casting | Clip::StrafeLeft | Clip::StrafeRight | Clip::Back
+            Clip::Idle | Clip::Run | Clip::Casting | Clip::StrafeLeft | Clip::StrafeRight | Clip::Back | Clip::Stunned | Clip::Incapped
         )
     }
 
@@ -261,6 +273,8 @@ pub struct Look {
 pub struct Anim {
     pub base: Clip,
     pub once: Option<(Clip, f32)>,
+    /// How fast the legs go: a slow drags them, a charge blurs them.
+    pub stride_speed: f32,
     playing: Option<Clip>,
     /// A one-shot was asked for since the last frame: play it from the start, even over itself.
     fresh: bool,
@@ -291,6 +305,7 @@ pub fn character(art: &Art, model: Model, gear: Gear) -> impl Bundle {
         Anim {
             base: Clip::Idle,
             once: None,
+            stride_speed: 1.0,
             playing: None,
             fresh: false,
             player: None,
@@ -353,11 +368,22 @@ fn drive_anims(
         };
         let Some(player_e) = anim.player else { continue };
         let Ok((mut player, mut transitions)) = players.get_mut(player_e) else { continue };
+        // Only running clips follow the stride's speed.
+        let legs = matches!(want, Clip::Run | Clip::StrafeLeft | Clip::StrafeRight | Clip::Back);
+        let speed = if legs { anim.stride_speed } else { 1.0 };
+        let nodes = &art.model(look.model).nodes;
+        if let Some(active) = anim
+            .playing
+            .and_then(|c| Clip::ALL.iter().position(|x| *x == c))
+            .and_then(|i| nodes.get(i))
+            .and_then(|n| player.animation_mut(*n))
+        {
+            active.set_speed(speed);
+        }
         if anim.playing == Some(want) && !anim.fresh {
             continue;
         }
         anim.fresh = false;
-        let nodes = &art.model(look.model).nodes;
         let Some(&node) = Clip::ALL.iter().position(|c| *c == want).and_then(|i| nodes.get(i)) else {
             continue;
         };
